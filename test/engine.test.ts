@@ -1621,4 +1621,57 @@ describe("LcmContextEngine.compact token budget plumbing", () => {
     expect(result.compacted).toBe(false);
     expect(result.reason).toBe("already under target");
   });
+
+  it("reports live overflow when a forced sweep cannot compact stored context", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: true,
+      reason: "threshold",
+      currentTokens: 277_403,
+      threshold: 150_000,
+    });
+    vi.spyOn(privateEngine.compaction, "compactFullSweep").mockResolvedValue({
+      actionTaken: false,
+      tokensBefore: 17_561,
+      tokensAfter: 17_561,
+      condensed: false,
+    });
+
+    await engine.ingest({
+      sessionId: "forced-sweep-live-overflow",
+      message: { role: "user", content: "trigger" } as AgentMessage,
+    });
+
+    const result = await engine.compact({
+      sessionId: "forced-sweep-live-overflow",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 200_000,
+      currentTokenCount: 277_403,
+      force: true,
+      compactionTarget: "budget",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toBe("live context still exceeds target");
+    expect(result.result?.tokensBefore).toBe(277_403);
+    expect(result.result?.tokensAfter).toBe(17_561);
+    expect(result.result?.details).toEqual(
+      expect.objectContaining({
+        rounds: 0,
+        targetTokens: 200_000,
+      }),
+    );
+  });
 });

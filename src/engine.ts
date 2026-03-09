@@ -1509,6 +1509,10 @@ export class LcmContextEngine implements ContextEngine {
         observedTokens !== undefined
           ? await this.compaction.evaluate(conversationId, tokenBudget, observedTokens)
           : await this.compaction.evaluate(conversationId, tokenBudget);
+      const targetTokens =
+        params.compactionTarget === "threshold" ? decision.threshold : tokenBudget;
+      const liveContextStillExceedsTarget =
+        observedTokens !== undefined && observedTokens >= targetTokens;
 
       if (!forceCompaction && !decision.shouldCompact) {
         return {
@@ -1533,27 +1537,28 @@ export class LcmContextEngine implements ContextEngine {
         });
 
         return {
-          ok: true,
+          ok: sweepResult.actionTaken || !liveContextStillExceedsTarget,
           compacted: sweepResult.actionTaken,
           reason: sweepResult.actionTaken
             ? "compacted"
             : manualCompactionRequested
               ? "nothing to compact"
-              : "already under target",
+              : liveContextStillExceedsTarget
+                ? "live context still exceeds target"
+                : "already under target",
           result: {
             tokensBefore: decision.currentTokens,
             tokensAfter: sweepResult.tokensAfter,
             details: {
               rounds: sweepResult.actionTaken ? 1 : 0,
-              targetTokens:
-                params.compactionTarget === "threshold" ? decision.threshold : tokenBudget,
+              targetTokens,
             },
           },
         };
       }
 
       // When forced, use the token budget as target
-      const targetTokens = forceCompaction
+      const convergenceTargetTokens = forceCompaction
         ? tokenBudget
         : params.compactionTarget === "threshold"
           ? decision.threshold
@@ -1562,7 +1567,7 @@ export class LcmContextEngine implements ContextEngine {
       const compactResult = await this.compaction.compactUntilUnder({
         conversationId,
         tokenBudget,
-        targetTokens,
+        targetTokens: convergenceTargetTokens,
         ...(observedTokens !== undefined ? { currentTokens: observedTokens } : {}),
         summarize,
       });
@@ -1581,7 +1586,7 @@ export class LcmContextEngine implements ContextEngine {
           tokensAfter: compactResult.finalTokens,
           details: {
             rounds: compactResult.rounds,
-            targetTokens,
+            targetTokens: convergenceTargetTokens,
           },
         },
       };
