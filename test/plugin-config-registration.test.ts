@@ -104,6 +104,7 @@ describe("lcm plugin registration", () => {
       closeLcmConnection(dbPath);
     }
     dbPaths.clear();
+    vi.unstubAllEnvs();
     for (const dir of tempDirs) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -249,7 +250,39 @@ describe("lcm plugin registration", () => {
     expect(warnLog).toHaveBeenCalledWith(expect.stringContaining("runtime.modelAuth is unavailable"));
   });
 
+  it("prefers runtime.modelAuth over provider env keys when available", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic-key");
+
+    const { api, getFactory } = buildApi({
+      enabled: true,
+    });
+    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+    const modelAuth = (
+      api.runtime as OpenClawPluginApi["runtime"] & {
+        modelAuth: {
+          getApiKeyForModel: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).modelAuth;
+    modelAuth.getApiKeyForModel.mockResolvedValue({
+      apiKey: "model-auth-key",
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    expect(factory).toBeTypeOf("function");
+
+    const engine = factory!() as {
+      deps?: { getApiKey: (provider: string, model: string) => Promise<string | undefined> };
+    };
+    await expect(engine.deps?.getApiKey("anthropic", "claude-sonnet-4-6")).resolves.toBe(
+      "model-auth-key",
+    );
+  });
+
   it("falls back to auth-profiles.json when runtime.modelAuth is unavailable", { timeout: 20000 }, async () => {
+    const provider = "lossless-test-provider";
     const agentDir = mkdtempSync(join(tmpdir(), "lossless-claw-auth-"));
     tempDirs.add(agentDir);
     writeFileSync(
@@ -258,14 +291,14 @@ describe("lcm plugin registration", () => {
         {
           version: 1,
           profiles: {
-            "anthropic:test": {
-              type: "token",
-              provider: "anthropic",
-              token: "token-from-auth-store",
+            "lossless-test-provider:test": {
+              type: "api_key",
+              provider,
+              key: "token-from-auth-store",
             },
           },
           order: {
-            anthropic: ["anthropic:test"],
+            [provider]: ["lossless-test-provider:test"],
           },
         },
         null,
@@ -280,7 +313,7 @@ describe("lcm plugin registration", () => {
       },
       { includeModelAuth: false, agentDir },
     );
-    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
+    api.config = defaultModelConfig(`${provider}/claude-sonnet-4-6`) as OpenClawPluginApi["config"];
 
     lcmPlugin.register(api);
 
@@ -290,7 +323,7 @@ describe("lcm plugin registration", () => {
     const engine = factory!() as {
       deps?: { getApiKey: (provider: string, model: string) => Promise<string | undefined> };
     };
-    await expect(engine.deps?.getApiKey("anthropic", "claude-sonnet-4-6")).resolves.toBe(
+    await expect(engine.deps?.getApiKey(provider, "claude-sonnet-4-6")).resolves.toBe(
       "token-from-auth-store",
     );
   });

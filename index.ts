@@ -805,10 +805,7 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
                 maxTokens: 8_000,
               };
 
-        let resolvedApiKey = apiKey?.trim() || resolveApiKey(providerId, readEnv);
-        if (!resolvedApiKey && typeof mod.getEnvApiKey === "function") {
-          resolvedApiKey = mod.getEnvApiKey(providerId)?.trim();
-        }
+        let resolvedApiKey = apiKey?.trim();
         if (!resolvedApiKey && modelAuth) {
           try {
             resolvedApiKey = resolveApiKeyFromAuthResult(
@@ -825,7 +822,13 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
             );
           }
         }
-        if (!resolvedApiKey) {
+        if (!resolvedApiKey && !modelAuth) {
+          resolvedApiKey = resolveApiKey(providerId, readEnv);
+        }
+        if (!resolvedApiKey && !modelAuth && typeof mod.getEnvApiKey === "function") {
+          resolvedApiKey = mod.getEnvApiKey(providerId)?.trim();
+        }
+        if (!resolvedApiKey && !modelAuth) {
           resolvedApiKey = await resolveApiKeyFromAuthProfiles({
             provider: providerId,
             authProfileId,
@@ -958,11 +961,6 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
       return { provider, model: raw };
     },
     getApiKey: async (provider, model, options) => {
-      const envKey = resolveApiKey(provider, readEnv);
-      if (envKey) {
-        return envKey;
-      }
-
       if (modelAuth) {
         try {
           const modelAuthKey = resolveApiKeyFromAuthResult(
@@ -981,6 +979,11 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
         }
       }
 
+      const envKey = resolveApiKey(provider, readEnv);
+      if (envKey) {
+        return envKey;
+      }
+
       const piAiModuleId = "@mariozechner/pi-ai";
       const mod = (await import(piAiModuleId)) as PiAiModule;
       return resolveApiKeyFromAuthProfiles({
@@ -994,11 +997,6 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
     },
     requireApiKey: async (provider, model, options) => {
       const key = await (async () => {
-        const envKey = resolveApiKey(provider, readEnv);
-        if (envKey) {
-          return envKey;
-        }
-
         if (modelAuth) {
           try {
             const modelAuthKey = resolveApiKeyFromAuthResult(
@@ -1015,6 +1013,11 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
           } catch {
             // Fall through to auth-profile lookup for older OpenClaw runtimes.
           }
+        }
+
+        const envKey = resolveApiKey(provider, readEnv);
+        if (envKey) {
+          return envKey;
         }
 
         const piAiModuleId = "@mariozechner/pi-ai";
