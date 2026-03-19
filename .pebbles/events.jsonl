@@ -139,3 +139,5 @@
 {"type":"comment","timestamp":"2026-03-19T18:27:39.100838Z","issue_id":"lossless-claw-035","payload":{"body":"Accidental duplicate created during concurrent Pebbles writes; superseded by epic child lossless-claw-f50.4."}}
 {"type":"close","timestamp":"2026-03-19T18:27:39.149384Z","issue_id":"lossless-claw-1ea","payload":{}}
 {"type":"close","timestamp":"2026-03-19T18:27:39.149384Z","issue_id":"lossless-claw-035","payload":{}}
+{"type":"status_update","timestamp":"2026-03-19T18:31:40.337791Z","issue_id":"lossless-claw-f50.1","payload":{"status":"in_progress"}}
+{"type":"close","timestamp":"2026-03-19T18:37:21.554217Z","issue_id":"lossless-claw-f50.1","payload":{}}

@@ -474,6 +474,16 @@ export function runLcmMigrations(
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS conversation_bootstrap_state (
+      conversation_id INTEGER PRIMARY KEY REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+      session_file_path TEXT NOT NULL,
+      last_seen_size INTEGER NOT NULL,
+      last_seen_mtime_ms INTEGER NOT NULL,
+      last_processed_offset INTEGER NOT NULL,
+      last_processed_entry_hash TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS messages_conv_seq_idx ON messages (conversation_id, seq);
     CREATE INDEX IF NOT EXISTS summaries_conv_created_idx ON summaries (conversation_id, created_at);
@@ -481,6 +491,8 @@ export function runLcmMigrations(
     CREATE INDEX IF NOT EXISTS message_parts_type_idx ON message_parts (part_type);
     CREATE INDEX IF NOT EXISTS context_items_conv_idx ON context_items (conversation_id, ordinal);
     CREATE INDEX IF NOT EXISTS large_files_conv_idx ON large_files (conversation_id, created_at);
+    CREATE INDEX IF NOT EXISTS bootstrap_state_path_idx
+      ON conversation_bootstrap_state (session_file_path, updated_at);
   `);
 
   // Forward-compatible conversations migration for existing DBs.

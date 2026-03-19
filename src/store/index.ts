@@ -26,4 +26,6 @@ export type {
   SummarySearchResult,
   CreateLargeFileInput,
   LargeFileRecord,
+  UpsertConversationBootstrapStateInput,
+  ConversationBootstrapStateRecord,
 } from "./summary-store.js";

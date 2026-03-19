@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -637,6 +637,15 @@ function toStoredMessage(message: AgentMessage): StoredMessage {
     content,
     tokenCount,
   };
+}
+
+function createBootstrapEntryHash(message: StoredMessage | null): string | null {
+  if (!message) {
+    return null;
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({ role: message.role, content: message.content }))
+    .digest("hex");
 }
 
 function estimateMessageContentTokensForAfterTurn(content: unknown): number {
@@ -1320,88 +1329,114 @@ export class LcmContextEngine implements ContextEngine {
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
       async () =>
         this.conversationStore.withTransaction(async () => {
+          const persistBootstrapState = async (
+            conversationId: number,
+            historicalMessages: AgentMessage[],
+          ): Promise<void> => {
+            const sessionFileStats = statSync(params.sessionFile);
+            const lastMessage =
+              historicalMessages.length > 0
+                ? toStoredMessage(historicalMessages[historicalMessages.length - 1]!)
+                : null;
+            await this.summaryStore.upsertConversationBootstrapState({
+              conversationId,
+              sessionFilePath: params.sessionFile,
+              lastSeenSize: sessionFileStats.size,
+              lastSeenMtimeMs: Math.trunc(sessionFileStats.mtimeMs),
+              lastProcessedOffset: sessionFileStats.size,
+              lastProcessedEntryHash: createBootstrapEntryHash(lastMessage),
+            });
+          };
+
           const conversation = await this.conversationStore.getOrCreateConversation(params.sessionId, {
             sessionKey: params.sessionKey,
           });
           const conversationId = conversation.conversationId;
           const historicalMessages = readLeafPathMessages(params.sessionFile);
 
-        // First-time import path: no LCM rows yet, so seed directly from the
-        // active leaf context snapshot.
-        const existingCount = await this.conversationStore.getMessageCount(conversationId);
-        if (existingCount === 0) {
-          if (historicalMessages.length === 0) {
+          // First-time import path: no LCM rows yet, so seed directly from the
+          // active leaf context snapshot.
+          const existingCount = await this.conversationStore.getMessageCount(conversationId);
+          if (existingCount === 0) {
+            if (historicalMessages.length === 0) {
+              await this.conversationStore.markConversationBootstrapped(conversationId);
+              await persistBootstrapState(conversationId, historicalMessages);
+              return {
+                bootstrapped: false,
+                importedMessages: 0,
+                reason: "no leaf-path messages in session",
+              };
+            }
+
+            const nextSeq = (await this.conversationStore.getMaxSeq(conversationId)) + 1;
+            const bulkInput = historicalMessages.map((message, index) => {
+              const stored = toStoredMessage(message);
+              return {
+                conversationId,
+                seq: nextSeq + index,
+                role: stored.role,
+                content: stored.content,
+                tokenCount: stored.tokenCount,
+              };
+            });
+
+            const inserted = await this.conversationStore.createMessagesBulk(bulkInput);
+            await this.summaryStore.appendContextMessages(
+              conversationId,
+              inserted.map((record) => record.messageId),
+            );
             await this.conversationStore.markConversationBootstrapped(conversationId);
+            await persistBootstrapState(conversationId, historicalMessages);
+
+            // Prune HEARTBEAT_OK turns from the freshly imported data
+            if (this.config.pruneHeartbeatOk) {
+              const pruned = await this.pruneHeartbeatOkTurns(conversationId);
+              if (pruned > 0) {
+                console.error(
+                  `[lcm] bootstrap: pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversationId}`,
+                );
+              }
+            }
+
+            return {
+              bootstrapped: true,
+              importedMessages: inserted.length,
+            };
+          }
+
+          // Existing conversation path: reconcile crash gaps by appending JSONL
+          // messages that were never persisted to LCM.
+          const reconcile = await this.reconcileSessionTail({
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            conversationId,
+            historicalMessages,
+          });
+
+          if (!conversation.bootstrappedAt) {
+            await this.conversationStore.markConversationBootstrapped(conversationId);
+          }
+
+          if (reconcile.importedMessages > 0) {
+            await persistBootstrapState(conversationId, historicalMessages);
+            return {
+              bootstrapped: true,
+              importedMessages: reconcile.importedMessages,
+              reason: "reconciled missing session messages",
+            };
+          }
+
+          if (reconcile.hasOverlap) {
+            await persistBootstrapState(conversationId, historicalMessages);
+          }
+
+          if (conversation.bootstrappedAt) {
             return {
               bootstrapped: false,
               importedMessages: 0,
-              reason: "no leaf-path messages in session",
+              reason: "already bootstrapped",
             };
           }
-
-          const nextSeq = (await this.conversationStore.getMaxSeq(conversationId)) + 1;
-          const bulkInput = historicalMessages.map((message, index) => {
-            const stored = toStoredMessage(message);
-            return {
-              conversationId,
-              seq: nextSeq + index,
-              role: stored.role,
-              content: stored.content,
-              tokenCount: stored.tokenCount,
-            };
-          });
-
-          const inserted = await this.conversationStore.createMessagesBulk(bulkInput);
-          await this.summaryStore.appendContextMessages(
-            conversationId,
-            inserted.map((record) => record.messageId),
-          );
-          await this.conversationStore.markConversationBootstrapped(conversationId);
-
-          // Prune HEARTBEAT_OK turns from the freshly imported data
-          if (this.config.pruneHeartbeatOk) {
-            const pruned = await this.pruneHeartbeatOkTurns(conversationId);
-            if (pruned > 0) {
-              console.error(
-                `[lcm] bootstrap: pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversationId}`,
-              );
-            }
-          }
-
-          return {
-            bootstrapped: true,
-            importedMessages: inserted.length,
-          };
-        }
-
-        // Existing conversation path: reconcile crash gaps by appending JSONL
-        // messages that were never persisted to LCM.
-        const reconcile = await this.reconcileSessionTail({
-          sessionId: params.sessionId,
-          sessionKey: params.sessionKey,
-          conversationId,
-          historicalMessages,
-        });
-
-        if (!conversation.bootstrappedAt) {
-          await this.conversationStore.markConversationBootstrapped(conversationId);
-        }
-
-        if (reconcile.importedMessages > 0) {
-          return {
-            bootstrapped: true,
-            importedMessages: reconcile.importedMessages,
-            reason: "reconciled missing session messages",
-          };
-        }
-
-        if (conversation.bootstrappedAt) {
-          return {
-            bootstrapped: false,
-            importedMessages: 0,
-            reason: "already bootstrapped",
-          };
-        }
 
           return {
             bootstrapped: false,

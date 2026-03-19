@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -1094,6 +1094,17 @@ describe("LcmContextEngine.bootstrap", () => {
       .getContextItems(conversation!.conversationId);
     expect(contextItems).toHaveLength(4);
     expect(contextItems.every((item) => item.itemType === "message")).toBe(true);
+
+    const bootstrapState = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    const sessionFileStats = statSync(sessionFile);
+    expect(bootstrapState).not.toBeNull();
+    expect(bootstrapState?.sessionFilePath).toBe(sessionFile);
+    expect(bootstrapState?.lastSeenSize).toBe(sessionFileStats.size);
+    expect(bootstrapState?.lastSeenMtimeMs).toBe(Math.trunc(sessionFileStats.mtimeMs));
+    expect(bootstrapState?.lastProcessedOffset).toBe(sessionFileStats.size);
+    expect(bootstrapState?.lastProcessedEntryHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("is idempotent and does not duplicate already bootstrapped sessions", async () => {
@@ -1146,6 +1157,13 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(first.bootstrapped).toBe(true);
     expect(first.importedMessages).toBe(2);
 
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const firstBootstrapState = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(firstBootstrapState).not.toBeNull();
+
     sm.appendMessage({
       role: "user",
       content: [{ type: "text", text: "lost user turn" }],
@@ -1160,8 +1178,6 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(second.importedMessages).toBe(2);
     expect(second.reason).toBe("reconciled missing session messages");
 
-    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
-    expect(conversation).not.toBeNull();
     const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
     expect(stored.map((message) => message.content)).toEqual([
       "seed user",
@@ -1169,6 +1185,18 @@ describe("LcmContextEngine.bootstrap", () => {
       "lost user turn",
       "lost assistant turn",
     ]);
+
+    const bootstrapState = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    const sessionFileStats = statSync(sessionFile);
+    expect(bootstrapState).not.toBeNull();
+    expect(bootstrapState?.lastSeenSize).toBe(sessionFileStats.size);
+    expect(bootstrapState?.lastSeenMtimeMs).toBe(Math.trunc(sessionFileStats.mtimeMs));
+    expect(bootstrapState?.lastProcessedOffset).toBe(sessionFileStats.size);
+    expect(bootstrapState?.lastProcessedEntryHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(bootstrapState?.lastSeenSize).toBeGreaterThan(firstBootstrapState!.lastSeenSize);
+    expect(bootstrapState?.lastProcessedEntryHash).not.toBe(firstBootstrapState!.lastProcessedEntryHash);
   });
 
   it("reconciles missing structured tool-call tail when prior empty tool content exists", async () => {

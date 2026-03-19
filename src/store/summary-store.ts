@@ -91,6 +91,25 @@ export type LargeFileRecord = {
   createdAt: Date;
 };
 
+export type UpsertConversationBootstrapStateInput = {
+  conversationId: number;
+  sessionFilePath: string;
+  lastSeenSize: number;
+  lastSeenMtimeMs: number;
+  lastProcessedOffset: number;
+  lastProcessedEntryHash?: string | null;
+};
+
+export type ConversationBootstrapStateRecord = {
+  conversationId: number;
+  sessionFilePath: string;
+  lastSeenSize: number;
+  lastSeenMtimeMs: number;
+  lastProcessedOffset: number;
+  lastProcessedEntryHash: string | null;
+  updatedAt: Date;
+};
+
 // ── DB row shapes (snake_case) ────────────────────────────────────────────────
 
 interface SummaryRow {
@@ -159,6 +178,16 @@ interface LargeFileRow {
   storage_uri: string;
   exploration_summary: string | null;
   created_at: string;
+}
+
+interface ConversationBootstrapStateRow {
+  conversation_id: number;
+  session_file_path: string;
+  last_seen_size: number;
+  last_seen_mtime_ms: number;
+  last_processed_offset: number;
+  last_processed_entry_hash: string | null;
+  updated_at: string;
 }
 
 // ── Row mappers ───────────────────────────────────────────────────────────────
@@ -234,6 +263,20 @@ function toLargeFileRecord(row: LargeFileRow): LargeFileRecord {
     storageUri: row.storage_uri,
     explorationSummary: row.exploration_summary,
     createdAt: new Date(row.created_at),
+  };
+}
+
+function toConversationBootstrapStateRecord(
+  row: ConversationBootstrapStateRow,
+): ConversationBootstrapStateRecord {
+  return {
+    conversationId: row.conversation_id,
+    sessionFilePath: row.session_file_path,
+    lastSeenSize: row.last_seen_size,
+    lastSeenMtimeMs: row.last_seen_mtime_ms,
+    lastProcessedOffset: row.last_processed_offset,
+    lastProcessedEntryHash: row.last_processed_entry_hash,
+    updatedAt: new Date(row.updated_at),
   };
 }
 
@@ -929,5 +972,64 @@ export class SummaryStore {
       )
       .all(conversationId) as unknown as LargeFileRow[];
     return rows.map(toLargeFileRecord);
+  }
+
+  // ── Bootstrap state ──────────────────────────────────────────────────────
+
+  async getConversationBootstrapState(
+    conversationId: number,
+  ): Promise<ConversationBootstrapStateRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_file_path, last_seen_size, last_seen_mtime_ms,
+                last_processed_offset, last_processed_entry_hash, updated_at
+         FROM conversation_bootstrap_state
+         WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as unknown as ConversationBootstrapStateRow | undefined;
+    return row ? toConversationBootstrapStateRecord(row) : null;
+  }
+
+  async upsertConversationBootstrapState(
+    input: UpsertConversationBootstrapStateInput,
+  ): Promise<ConversationBootstrapStateRecord> {
+    this.db
+      .prepare(
+        `INSERT INTO conversation_bootstrap_state (
+           conversation_id,
+           session_file_path,
+           last_seen_size,
+           last_seen_mtime_ms,
+           last_processed_offset,
+           last_processed_entry_hash
+         )
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (conversation_id) DO UPDATE SET
+           session_file_path = excluded.session_file_path,
+           last_seen_size = excluded.last_seen_size,
+           last_seen_mtime_ms = excluded.last_seen_mtime_ms,
+           last_processed_offset = excluded.last_processed_offset,
+           last_processed_entry_hash = excluded.last_processed_entry_hash,
+           updated_at = datetime('now')`,
+      )
+      .run(
+        input.conversationId,
+        input.sessionFilePath,
+        Math.max(0, Math.floor(input.lastSeenSize)),
+        Math.max(0, Math.floor(input.lastSeenMtimeMs)),
+        Math.max(0, Math.floor(input.lastProcessedOffset)),
+        input.lastProcessedEntryHash ?? null,
+      );
+
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_file_path, last_seen_size, last_seen_mtime_ms,
+                last_processed_offset, last_processed_entry_hash, updated_at
+         FROM conversation_bootstrap_state
+         WHERE conversation_id = ?`,
+      )
+      .get(input.conversationId) as unknown as ConversationBootstrapStateRow;
+
+    return toConversationBootstrapStateRecord(row);
   }
 }
