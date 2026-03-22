@@ -580,12 +580,12 @@ describe("createLcmSummarizeFromLegacyParams", () => {
           })),
         });
 
-        const summarize = await createLcmSummarizeFromLegacyParams({
+        const result = await createLcmSummarizeFromLegacyParams({
           deps,
           legacyParams: { provider: "openai-codex", model: "gpt-5.4" },
         });
 
-        const summary = await summarize!("A".repeat(8_000), false);
+        const summary = await result!.fn("A".repeat(8_000), false);
 
         expect(summary).toBe("");
         expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(1);
@@ -624,12 +624,12 @@ describe("createLcmSummarizeFromLegacyParams", () => {
           }),
         });
 
-        const summarize = await createLcmSummarizeFromLegacyParams({
+        const result = await createLcmSummarizeFromLegacyParams({
           deps,
           legacyParams: { provider: "openai-codex", model: "gpt-5.4" },
         });
 
-        const summary = await summarize!("B".repeat(8_000), false);
+        const summary = await result!.fn("B".repeat(8_000), false);
 
         expect(summary).toBe("");
         expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(1);
