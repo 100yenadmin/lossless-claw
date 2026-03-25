@@ -326,7 +326,8 @@ describe("createLcmSummarizeFromLegacyParams", () => {
     const normalMaxTokens = Number(completeMock.mock.calls[0]?.[0]?.maxTokens ?? 0);
     const aggressiveMaxTokens = Number(completeMock.mock.calls[1]?.[0]?.maxTokens ?? 0);
     expect(aggressiveMaxTokens).toBeLessThan(normalMaxTokens);
-    expect(completeMock.mock.calls[1]?.[0]?.temperature).toBe(0.1);
+    expect(completeMock.mock.calls[0]?.[0]?.temperature).toBeUndefined();
+    expect(completeMock.mock.calls[1]?.[0]?.temperature).toBeUndefined();
   });
 
   it("uses condensed prompt mode for condensed summaries", async () => {
@@ -729,7 +730,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
 
         // Retry call should use conservative settings.
         const retryArgs = vi.mocked(deps.complete).mock.calls[1]?.[0];
-        expect(retryArgs?.temperature).toBe(0.05);
+        expect(retryArgs?.temperature).toBeUndefined();
         expect(retryArgs?.reasoning).toBe("low");
 
         // Should log the retry-succeeded diagnostic.

@@ -998,7 +998,6 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           },
         ],
         maxTokens: targetTokens,
-        temperature: aggressive ? 0.1 : 0.2,
       }), SUMMARIZER_TIMEOUT_MS, "initial");
     } catch (err) {
       const authFailure = extractProviderAuthFailure(err);
@@ -1083,7 +1082,6 @@ export async function createLcmSummarizeFromLegacyParams(params: {
             },
           ],
           maxTokens: targetTokens,
-          temperature: 0.05,
           reasoning: "low",
         }), SUMMARIZER_TIMEOUT_MS, "retry");
         const retryAuthFailure = extractProviderAuthFailure(retryResult);
