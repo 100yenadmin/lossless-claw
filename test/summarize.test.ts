@@ -219,6 +219,46 @@ describe("createLcmSummarizeFromLegacyParams", () => {
     expect(vi.mocked(deps.resolveModel)).toHaveBeenCalledWith("openai-resp/gpt-4.1-mini", undefined);
   });
 
+  it("uses OpenClaw default model before the runtime session model when no summary override exists", async () => {
+    const deps = makeDeps({
+      resolveModel: vi.fn((modelRef?: string, providerHint?: string) => {
+        if (modelRef === "anthropic/claude-sonnet-4-6") {
+          return { provider: "anthropic", model: "claude-sonnet-4-6" };
+        }
+        if (modelRef === "gpt-5.4") {
+          return { provider: providerHint ?? "openai-codex", model: "gpt-5.4" };
+        }
+        throw new Error(`unexpected modelRef: ${String(modelRef)}`);
+      }),
+      complete: vi.fn(async () => ({
+        content: [{ type: "text", text: "summary output" }],
+      })),
+    });
+
+    const summarize = await createSummarizeFn({
+      deps,
+      legacyParams: {
+        provider: "openai-codex",
+        model: "gpt-5.4",
+        config: {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-sonnet-4-6",
+            },
+          },
+        },
+      },
+    });
+
+    await summarize!("hello world", false);
+
+    expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deps.complete).mock.calls[0]?.[0]).toMatchObject({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
   it("supports compaction model objects with primary", async () => {
     const deps = makeDeps();
 
@@ -694,6 +734,82 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       } finally {
         consoleWarn.mockRestore();
         consoleError.mockRestore();
+      }
+    });
+
+    it("falls back to the next resolved model when the preferred model fails auth", async () => {
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const deps = makeDeps({
+          resolveModel: vi.fn((modelRef?: string, providerHint?: string) => {
+            if (modelRef === "gpt-5.4") {
+              return { provider: providerHint ?? "openai-codex", model: "gpt-5.4" };
+            }
+            if (modelRef === "anthropic/claude-sonnet-4-6") {
+              return { provider: "anthropic", model: "claude-sonnet-4-6" };
+            }
+            throw new Error(`unexpected modelRef: ${String(modelRef)}`);
+          }),
+          complete: vi.fn(async ({ provider }: { provider?: string }) => {
+            if (provider === "openai-codex") {
+              return {
+                content: [],
+                error: {
+                  kind: "provider_auth",
+                  statusCode: 401,
+                  message: "Missing required scope: model.request",
+                },
+              };
+            }
+            return {
+              content: [{ type: "text", text: "Recovered summary from fallback model." }],
+            };
+          }),
+        });
+
+        const summarize = await createSummarizeFn({
+          deps,
+          legacyParams: {
+            provider: "openai-codex",
+            model: "gpt-5.4",
+            config: {
+              plugins: {
+                entries: {
+                  "lossless-claw": {
+                    config: {
+                      summaryProvider: "openai-codex",
+                      summaryModel: "gpt-5.4",
+                    },
+                  },
+                },
+              },
+              agents: {
+                defaults: {
+                  model: "anthropic/claude-sonnet-4-6",
+                },
+              },
+            },
+          },
+        });
+
+        const summary = await summarize!("A".repeat(8_000), false);
+
+        expect(summary).toBe("Recovered summary from fallback model.");
+        expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(deps.complete).mock.calls[0]?.[0]).toMatchObject({
+          provider: "openai-codex",
+          model: "gpt-5.4",
+        });
+        expect(vi.mocked(deps.complete).mock.calls[1]?.[0]).toMatchObject({
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+        });
+
+        const warningText = consoleWarn.mock.calls.flatMap((call) => call.map(String)).join(" ");
+        expect(warningText).toContain("summarizer auth fallback");
+        expect(warningText).toContain("retrying with anthropic/claude-sonnet-4-6");
+      } finally {
+        consoleWarn.mockRestore();
       }
     });
 

@@ -20,6 +20,19 @@ export type LcmSummarizerLegacyParams = {
   authProfileId?: unknown;
 };
 
+type SummaryResolutionCandidate = {
+  levelName: string;
+  modelRef: string;
+  providerHint?: string;
+  hasExplicitProvider: boolean;
+  useLegacyAuthProfile: boolean;
+};
+
+type ResolvedSummaryCandidate = SummaryResolutionCandidate & {
+  provider: string;
+  model: string;
+};
+
 type SummaryMode = "normal" | "aggressive";
 
 const DEFAULT_CONDENSED_TARGET_TOKENS = 2000;
@@ -815,30 +828,47 @@ function buildDeterministicFallbackSummary(text: string, targetTokens: number): 
   return `${trimmed.slice(0, maxChars)}\n[LCM fallback summary; truncated for context management]`;
 }
 
-/**
- * Builds a model-backed LCM summarize callback from runtime legacy params.
- *
- * Returns `undefined` when model/provider context is unavailable so callers can
- * choose a fallback summarizer.
- */
-export async function createLcmSummarizeFromLegacyParams(params: {
+/** Normalize model refs from string or `{ primary }` config shapes. */
+function readModelRef(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  const primary = (value as { primary?: unknown } | undefined)?.primary;
+  return typeof primary === "string" ? primary.trim() : "";
+}
+
+/** Avoid retrying the same resolved provider/model pair across fallback levels. */
+function dedupeResolvedCandidates(
+  candidates: ResolvedSummaryCandidate[],
+): ResolvedSummaryCandidate[] {
+  const seen = new Set<string>();
+  const ordered: ResolvedSummaryCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = `${candidate.provider}\u0000${candidate.model}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    ordered.push(candidate);
+  }
+  return ordered;
+}
+
+/** Resolve ordered summarizer candidates from env, plugin config, defaults, and session hints. */
+function resolveSummaryCandidates(params: {
   deps: LcmDependencies;
   legacyParams: LcmSummarizerLegacyParams;
-  customInstructions?: string;
-}): Promise<{ fn: LcmSummarizeFn; model: string } | undefined> {
-  const readModelRef = (value: unknown): string => {
-    if (typeof value === "string") {
-      return value.trim();
-    }
-    const primary = (value as { primary?: unknown } | undefined)?.primary;
-    return typeof primary === "string" ? primary.trim() : "";
-  };
-
+}): ResolvedSummaryCandidate[] {
+  const providerHint =
+    typeof params.legacyParams.provider === "string" ? params.legacyParams.provider.trim() : "";
+  const modelHint =
+    typeof params.legacyParams.model === "string" ? params.legacyParams.model.trim() : "";
   const runtimeConfig =
     params.legacyParams.config && typeof params.legacyParams.config === "object"
       ? (params.legacyParams.config as {
           agents?: {
             defaults?: {
+              model?: unknown;
               compaction?: {
                 model?: unknown;
               };
@@ -853,85 +883,110 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           };
         })
       : undefined;
-
   const nestedPluginConfig = runtimeConfig?.plugins?.entries?.["lossless-claw"]?.config;
 
-  const summaryLevels = [
+  const resolutionCandidates: SummaryResolutionCandidate[] = [
     {
       levelName: "environment variables",
-      model: process.env.LCM_SUMMARY_MODEL?.trim() ?? "",
-      provider: process.env.LCM_SUMMARY_PROVIDER?.trim() ?? "",
+      modelRef: process.env.LCM_SUMMARY_MODEL?.trim() ?? "",
+      providerHint:
+        process.env.LCM_SUMMARY_PROVIDER?.trim() ||
+        (providerHint || undefined),
+      hasExplicitProvider: Boolean(process.env.LCM_SUMMARY_PROVIDER?.trim()),
+      useLegacyAuthProfile: false,
     },
     {
       levelName: "plugin config (lossless-claw)",
-      model: readModelRef(nestedPluginConfig?.summaryModel),
-      provider: typeof nestedPluginConfig?.summaryProvider === "string" ? nestedPluginConfig.summaryProvider.trim() : "",
+      modelRef: readModelRef(nestedPluginConfig?.summaryModel),
+      providerHint:
+        (typeof nestedPluginConfig?.summaryProvider === "string"
+          ? nestedPluginConfig.summaryProvider.trim()
+          : "") || (providerHint || undefined),
+      hasExplicitProvider: Boolean(
+        typeof nestedPluginConfig?.summaryProvider === "string" &&
+          nestedPluginConfig.summaryProvider.trim(),
+      ),
+      useLegacyAuthProfile: false,
     },
     {
       levelName: "OpenClaw agents.defaults.compaction.model",
-      model: readModelRef(runtimeConfig?.agents?.defaults?.compaction?.model),
-      provider: "",
+      modelRef: readModelRef(runtimeConfig?.agents?.defaults?.compaction?.model),
+      providerHint: undefined,
+      hasExplicitProvider: false,
+      useLegacyAuthProfile: false,
+    },
+    {
+      levelName: "OpenClaw agents.defaults.model",
+      modelRef: readModelRef(runtimeConfig?.agents?.defaults?.model),
+      providerHint: undefined,
+      hasExplicitProvider: false,
+      useLegacyAuthProfile: false,
+    },
+    {
+      levelName: "legacy runtime/session model",
+      modelRef: modelHint,
+      providerHint: providerHint || undefined,
+      hasExplicitProvider: Boolean(providerHint),
+      useLegacyAuthProfile: true,
     },
   ];
 
-  let resolvedSummary: { model: string; provider: string | undefined } | undefined;
-  for (const level of summaryLevels) {
-    if (!level.model) continue;
-    if (level.model.includes("/")) {
-      resolvedSummary = { model: level.model, provider: undefined };
-      break;
+  const resolvedCandidates: ResolvedSummaryCandidate[] = [];
+  for (const candidate of resolutionCandidates) {
+    if (!candidate.modelRef) {
+      continue;
     }
-    if (level.provider) {
-      resolvedSummary = { model: level.model, provider: level.provider };
-      break;
+    if (!candidate.modelRef.includes("/") && !candidate.hasExplicitProvider) {
+      params.deps.log.warn(
+        `[lcm] summaryModel "${candidate.modelRef}" at "${candidate.levelName}" has no summaryProvider or provider prefix. Will attempt resolution without provider.`,
+      );
     }
-    params.deps.log.warn(
-      `[lcm] summaryModel "${level.model}" at "${level.levelName}" has no summaryProvider or provider prefix. Will attempt resolution without provider.`
-    );
-    resolvedSummary = { model: level.model, provider: undefined };
-    break;
+    try {
+      const resolved = params.deps.resolveModel(candidate.modelRef, candidate.providerHint);
+      if (resolved.provider && resolved.model) {
+        resolvedCandidates.push({
+          ...candidate,
+          provider: resolved.provider,
+          model: resolved.model,
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[lcm] createLcmSummarize: resolveModel FAILED at ${candidate.levelName}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
-  const providerHint =
-    typeof params.legacyParams.provider === "string" ? params.legacyParams.provider.trim() : "";
-  const modelHint =
-    typeof params.legacyParams.model === "string" ? params.legacyParams.model.trim() : "";
-  const modelRef = resolvedSummary?.model || modelHint || undefined;
+  return dedupeResolvedCandidates(resolvedCandidates);
+}
 
-  const resolveProviderHint =
-    resolvedSummary !== undefined
-      ? (
-          resolvedSummary.provider ||
-          (!resolvedSummary.model.includes("/") ? (providerHint || undefined) : undefined)
-        )
-      : (providerHint || undefined);
-
-  let resolved: { provider: string; model: string };
-  try {
-    resolved = params.deps.resolveModel(modelRef, resolveProviderHint);
-  } catch (err) {
-    console.error(`[lcm] createLcmSummarize: resolveModel FAILED:`, err instanceof Error ? err.message : err);
+/**
+ * Builds a model-backed LCM summarize callback from runtime legacy params.
+ *
+ * Returns `undefined` when model/provider context is unavailable so callers can
+ * choose a fallback summarizer.
+ */
+export async function createLcmSummarizeFromLegacyParams(params: {
+  deps: LcmDependencies;
+  legacyParams: LcmSummarizerLegacyParams;
+  customInstructions?: string;
+}): Promise<{ fn: LcmSummarizeFn; model: string } | undefined> {
+  const resolvedCandidates = resolveSummaryCandidates(params);
+  if (resolvedCandidates.length === 0) {
+    console.error("[lcm] createLcmSummarize: no summary model candidates resolved");
     return undefined;
   }
 
-  const { provider, model } = resolved;
-  if (!provider || !model) {
-    console.error(`[lcm] createLcmSummarize: empty provider="${provider}" or model="${model}"`);
-    return undefined;
-  }
   const legacyAuthProfileId =
     typeof params.legacyParams.authProfileId === "string" &&
     params.legacyParams.authProfileId.trim()
       ? params.legacyParams.authProfileId.trim()
       : undefined;
-  // When LCM selects a dedicated summarizer model/provider, do not leak the
-  // active session's auth profile into that separate credential lookup.
-  const authProfileId = resolvedSummary === undefined ? legacyAuthProfileId : undefined;
   const agentDir =
     typeof params.legacyParams.agentDir === "string" && params.legacyParams.agentDir.trim()
       ? params.legacyParams.agentDir.trim()
       : undefined;
-  const providerApi = resolveProviderApiFromLegacyConfig(params.legacyParams.config, provider);
 
   const condensedTargetTokens =
     Number.isFinite(params.deps.config.condensedTargetTokens) &&
@@ -950,11 +1005,6 @@ export async function createLcmSummarizeFromLegacyParams(params: {
 
     const mode: SummaryMode = aggressive ? "aggressive" : "normal";
     const isCondensed = options?.isCondensed === true;
-    const apiKey = await params.deps.getApiKey(provider, model, {
-      profileId: authProfileId,
-      agentDir,
-      runtimeConfig: params.legacyParams.config,
-    });
     const targetTokens = resolveTargetTokens({
       inputTokens: estimateTokens(text),
       mode,
@@ -980,93 +1030,23 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           customInstructions: params.customInstructions,
         });
 
-    let result: Awaited<ReturnType<typeof params.deps.complete>>;
-    try {
-      result = await withTimeout(params.deps.complete({
-        provider,
-        model,
-        apiKey,
-        providerApi,
-        authProfileId,
+    let lastAuthError: LcmProviderAuthError | undefined;
+
+    for (let index = 0; index < resolvedCandidates.length; index += 1) {
+      const candidate = resolvedCandidates[index]!;
+      const provider = candidate.provider;
+      const model = candidate.model;
+      const authProfileId = candidate.useLegacyAuthProfile ? legacyAuthProfileId : undefined;
+      const providerApi = resolveProviderApiFromLegacyConfig(params.legacyParams.config, provider);
+      const apiKey = await params.deps.getApiKey(provider, model, {
+        profileId: authProfileId,
         agentDir,
         runtimeConfig: params.legacyParams.config,
-        system: LCM_SUMMARIZER_SYSTEM_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        maxTokens: targetTokens,
-      }), SUMMARIZER_TIMEOUT_MS, "initial");
-    } catch (err) {
-      const authFailure = extractProviderAuthFailure(err);
-      if (authFailure) {
-        const authError = new LcmProviderAuthError({ provider, model, failure: authFailure });
-        console.warn(authError.message);
-        throw authError;
-      }
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const isTimeout = errMsg.includes("summarizer timeout");
-      console.warn(
-        `[lcm] summarizer ${isTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${errMsg}`,
-      );
-      if (err instanceof SummarizerTimeoutError) {
-        console.error(
-          `[lcm] summarizer timed out; provider=${provider}; model=${model}; source=fallback`,
-        );
-        return buildDeterministicFallbackSummary(text, targetTokens);
-      }
-      return "";
-    }
+      });
 
-    const authFailure = extractProviderAuthFailure(result);
-    if (authFailure) {
-      const authError = new LcmProviderAuthError({ provider, model, failure: authFailure });
-      console.warn(authError.message);
-      throw authError;
-    }
-
-    const normalized = normalizeCompletionSummary(result.content);
-    let summary = normalized.summary;
-    let summarySource: "content" | "envelope" | "retry" | "fallback" = "content";
-
-    // --- Empty-summary hardening: envelope → retry → deterministic fallback ---
-    if (!summary) {
-      // Envelope-aware extraction: some providers place summary text in
-      // top-level response fields (output, message, response) rather than
-      // inside the content array.  Re-run normalization against the full
-      // response envelope before spending an API call on a retry.
-      const envelopeNormalized = normalizeCompletionSummary(result);
-      if (envelopeNormalized.summary) {
-        summary = envelopeNormalized.summary;
-        summarySource = "envelope";
-        console.error(
-          `[lcm] recovered summary from response envelope; provider=${provider}; model=${model}; ` +
-            `block_types=${formatBlockTypes(envelopeNormalized.blockTypes)}; source=envelope`,
-        );
-      }
-    }
-
-    if (!summary) {
-      const responseDiag = extractResponseDiagnostics(result);
-      const diagParts = [
-        `[lcm] empty normalized summary on first attempt`,
-        `provider=${provider}`,
-        `model=${model}`,
-        `block_types=${formatBlockTypes(normalized.blockTypes)}`,
-        `response_blocks=${result.content.length}`,
-      ];
-      if (responseDiag) {
-        diagParts.push(responseDiag);
-      }
-      console.error(`${diagParts.join("; ")}; retrying with conservative settings`);
-
-      // Single retry with conservative parameters: low temperature and low
-      // reasoning budget to coax a textual response from providers that
-      // sometimes return reasoning-only or empty blocks on the first pass.
+      let result: Awaited<ReturnType<typeof params.deps.complete>>;
       try {
-        const retryResult = await withTimeout(params.deps.complete({
+        result = await withTimeout(params.deps.complete({
           provider,
           model,
           apiKey,
@@ -1082,68 +1062,191 @@ export async function createLcmSummarizeFromLegacyParams(params: {
             },
           ],
           maxTokens: targetTokens,
-          reasoning: "low",
-        }), SUMMARIZER_TIMEOUT_MS, "retry");
-        const retryAuthFailure = extractProviderAuthFailure(retryResult);
-        if (retryAuthFailure) {
-          console.warn(buildProviderAuthWarning({ provider, model, failure: retryAuthFailure }));
-          return "";
-        }
-
-        const retryNormalized = normalizeCompletionSummary(retryResult.content);
-        summary = retryNormalized.summary;
-
-        if (summary) {
-          summarySource = "retry";
-          console.error(
-            `[lcm] retry succeeded; provider=${provider}; model=${model}; ` +
-              `block_types=${formatBlockTypes(retryNormalized.blockTypes)}; source=retry`,
-          );
-        } else {
-          const retryDiag = extractResponseDiagnostics(retryResult);
-          const retryParts = [
-            `[lcm] retry also returned empty summary`,
-            `provider=${provider}`,
-            `model=${model}`,
-            `block_types=${formatBlockTypes(retryNormalized.blockTypes)}`,
-            `response_blocks=${retryResult.content.length}`,
-          ];
-          if (retryDiag) {
-            retryParts.push(retryDiag);
+        }), SUMMARIZER_TIMEOUT_MS, "initial");
+      } catch (err) {
+        const authFailure = extractProviderAuthFailure(err);
+        if (authFailure) {
+          lastAuthError = new LcmProviderAuthError({ provider, model, failure: authFailure });
+          console.warn(lastAuthError.message);
+          if (index < resolvedCandidates.length - 1) {
+            const nextCandidate = resolvedCandidates[index + 1]!;
+            console.warn(
+              `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
+            );
+            continue;
           }
-          console.error(`${retryParts.join("; ")}; falling back to truncation`);
+          throw lastAuthError;
         }
-      } catch (retryErr) {
-        const retryAuthFailure = extractProviderAuthFailure(retryErr);
-        if (retryAuthFailure) {
-          console.warn(buildProviderAuthWarning({ provider, model, failure: retryAuthFailure }));
-          return "";
-        }
-        // Retry is best-effort; log and proceed to deterministic fallback.
-        const retryErrMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-        const isRetryTimeout = retryErrMsg.includes("summarizer timeout");
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isTimeout = errMsg.includes("summarizer timeout");
         console.warn(
-          `[lcm] retry ${isRetryTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${retryErrMsg}; falling back to truncation`,
+          `[lcm] summarizer ${isTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${errMsg}`,
+        );
+        if (err instanceof SummarizerTimeoutError) {
+          console.error(
+            `[lcm] summarizer timed out; provider=${provider}; model=${model}; source=fallback`,
+          );
+          return buildDeterministicFallbackSummary(text, targetTokens);
+        }
+        return "";
+      }
+
+      const authFailure = extractProviderAuthFailure(result);
+      if (authFailure) {
+        lastAuthError = new LcmProviderAuthError({ provider, model, failure: authFailure });
+        console.warn(lastAuthError.message);
+        if (index < resolvedCandidates.length - 1) {
+          const nextCandidate = resolvedCandidates[index + 1]!;
+          console.warn(
+            `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
+          );
+          continue;
+        }
+        throw lastAuthError;
+      }
+
+      const normalized = normalizeCompletionSummary(result.content);
+      let summary = normalized.summary;
+      let summarySource: "content" | "envelope" | "retry" | "fallback" = "content";
+
+      // --- Empty-summary hardening: envelope → retry → deterministic fallback ---
+      if (!summary) {
+        // Envelope-aware extraction: some providers place summary text in
+        // top-level response fields (output, message, response) rather than
+        // inside the content array.  Re-run normalization against the full
+        // response envelope before spending an API call on a retry.
+        const envelopeNormalized = normalizeCompletionSummary(result);
+        if (envelopeNormalized.summary) {
+          summary = envelopeNormalized.summary;
+          summarySource = "envelope";
+          console.error(
+            `[lcm] recovered summary from response envelope; provider=${provider}; model=${model}; ` +
+              `block_types=${formatBlockTypes(envelopeNormalized.blockTypes)}; source=envelope`,
+          );
+        }
+      }
+
+      if (!summary) {
+        const responseDiag = extractResponseDiagnostics(result);
+        const diagParts = [
+          `[lcm] empty normalized summary on first attempt`,
+          `provider=${provider}`,
+          `model=${model}`,
+          `block_types=${formatBlockTypes(normalized.blockTypes)}`,
+          `response_blocks=${result.content.length}`,
+        ];
+        if (responseDiag) {
+          diagParts.push(responseDiag);
+        }
+        console.error(`${diagParts.join("; ")}; retrying with conservative settings`);
+
+        // Single retry with conservative parameters: low temperature and low
+        // reasoning budget to coax a textual response from providers that
+        // sometimes return reasoning-only or empty blocks on the first pass.
+        try {
+          const retryResult = await withTimeout(params.deps.complete({
+            provider,
+            model,
+            apiKey,
+            providerApi,
+            authProfileId,
+            agentDir,
+            runtimeConfig: params.legacyParams.config,
+            system: LCM_SUMMARIZER_SYSTEM_PROMPT,
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            maxTokens: targetTokens,
+            reasoning: "low",
+          }), SUMMARIZER_TIMEOUT_MS, "retry");
+          const retryAuthFailure = extractProviderAuthFailure(retryResult);
+          if (retryAuthFailure) {
+            lastAuthError = new LcmProviderAuthError({ provider, model, failure: retryAuthFailure });
+            console.warn(lastAuthError.message);
+            if (index < resolvedCandidates.length - 1) {
+              const nextCandidate = resolvedCandidates[index + 1]!;
+              console.warn(
+                `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
+              );
+              continue;
+            }
+            throw lastAuthError;
+          }
+
+          const retryNormalized = normalizeCompletionSummary(retryResult.content);
+          summary = retryNormalized.summary;
+
+          if (summary) {
+            summarySource = "retry";
+            console.error(
+              `[lcm] retry succeeded; provider=${provider}; model=${model}; ` +
+                `block_types=${formatBlockTypes(retryNormalized.blockTypes)}; source=retry`,
+            );
+          } else {
+            const retryDiag = extractResponseDiagnostics(retryResult);
+            const retryParts = [
+              `[lcm] retry also returned empty summary`,
+              `provider=${provider}`,
+              `model=${model}`,
+              `block_types=${formatBlockTypes(retryNormalized.blockTypes)}`,
+              `response_blocks=${retryResult.content.length}`,
+            ];
+            if (retryDiag) {
+              retryParts.push(retryDiag);
+            }
+            console.error(`${retryParts.join("; ")}; falling back to truncation`);
+          }
+        } catch (retryErr) {
+          if (retryErr instanceof LcmProviderAuthError) {
+            throw retryErr;
+          }
+          const retryAuthFailure = extractProviderAuthFailure(retryErr);
+          if (retryAuthFailure) {
+            lastAuthError = new LcmProviderAuthError({ provider, model, failure: retryAuthFailure });
+            console.warn(lastAuthError.message);
+            if (index < resolvedCandidates.length - 1) {
+              const nextCandidate = resolvedCandidates[index + 1]!;
+              console.warn(
+                `[lcm] summarizer auth fallback: retrying with ${nextCandidate.provider}/${nextCandidate.model} after ${provider}/${model} failed auth.`,
+              );
+              continue;
+            }
+            throw lastAuthError;
+          }
+          // Retry is best-effort; log and proceed to deterministic fallback.
+          const retryErrMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          const isRetryTimeout = retryErrMsg.includes("summarizer timeout");
+          console.warn(
+            `[lcm] retry ${isRetryTimeout ? "timed out" : "failed"}; provider=${provider}; model=${model}; timeout=${SUMMARIZER_TIMEOUT_MS}ms; error=${retryErrMsg}; falling back to truncation`,
+          );
+        }
+      }
+
+      if (!summary) {
+        summarySource = "fallback";
+        console.error(
+          `[lcm] all extraction attempts exhausted; provider=${provider}; model=${model}; source=fallback`,
+        );
+        return buildDeterministicFallbackSummary(text, targetTokens);
+      }
+
+      if (summarySource !== "content") {
+        console.error(
+          `[lcm] summary resolved via non-content path; provider=${provider}; model=${model}; source=${summarySource}`,
         );
       }
+
+      return summary;
     }
 
-    if (!summary) {
-      summarySource = "fallback";
-      console.error(
-        `[lcm] all extraction attempts exhausted; provider=${provider}; model=${model}; source=fallback`,
-      );
-      return buildDeterministicFallbackSummary(text, targetTokens);
+    if (lastAuthError) {
+      throw lastAuthError;
     }
-
-    if (summarySource !== "content") {
-      console.error(
-        `[lcm] summary resolved via non-content path; provider=${provider}; model=${model}; source=${summarySource}`,
-      );
-    }
-
-    return summary;
+    return "";
   };
 
-  return { fn, model };
+  return { fn, model: resolvedCandidates[0]!.model };
 }

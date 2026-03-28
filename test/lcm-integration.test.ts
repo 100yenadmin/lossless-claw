@@ -2732,6 +2732,55 @@ describe("LCM integration: media message annotation in compaction", () => {
     expect(summarizedText).not.toContain("MEDIA:/tmp/uploads/photo_2026.png");
   });
 
+  it("strips JSON-encoded image payloads before compaction summarization", async () => {
+    const base64Image = "QUJD".repeat(300);
+    const msgs = await ingestMessages(convStore, sumStore, 8, {
+      contentFn: (i) =>
+        i === 3
+          ? JSON.stringify([
+              {
+                type: "image",
+                image_url: `data:image/png;base64,${base64Image}`,
+              },
+            ])
+          : `Discussion point ${i}: ${"x".repeat(200)}`,
+      tokenCountFn: (_i, content) => estimateTokens(content),
+    });
+
+    await convStore.createMessageParts(msgs[3].messageId, [
+      {
+        sessionId: "test-session",
+        partType: "file",
+        ordinal: 0,
+        textContent: null,
+        metadata: JSON.stringify({
+          rawType: "image",
+          raw: {
+            type: "image",
+            image_url: `data:image/png;base64,${base64Image}`,
+          },
+        }),
+      },
+    ]);
+
+    let summarizedText = "";
+    const summarize = vi.fn(async (text: string) => {
+      summarizedText = text;
+      return `Summary: ${text.substring(0, 100)}`;
+    });
+
+    await compactionEngine.compact({
+      conversationId: CONV_ID,
+      tokenBudget: 10_000,
+      summarize,
+      force: true,
+    });
+
+    expect(summarizedText).toContain("[Media attachment]");
+    expect(summarizedText).not.toContain("data:image/png;base64");
+    expect(summarizedText).not.toContain(base64Image.slice(0, 64));
+  });
+
   it("annotates media-mostly messages with text + [with media attachment]", async () => {
     const msgs = await ingestMessages(convStore, sumStore, 8, {
       contentFn: (i) =>

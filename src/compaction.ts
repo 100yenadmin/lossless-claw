@@ -150,6 +150,11 @@ const DEFAULT_LEAF_CHUNK_TOKENS = 20_000;
  * with no meaningful text.
  */
 const MEDIA_PATH_RE = /^MEDIA:\/.+$/;
+const EMBEDDED_DATA_URL_RE = /data:[^;\s"'`]+;base64,[A-Za-z0-9+/=\s]+/gi;
+const MEDIA_ATTACHMENT_PART_TYPES = new Set(["file", "snapshot"]);
+const MEDIA_ATTACHMENT_RAW_TYPES = new Set(["file", "image", "snapshot"]);
+const STRUCTURED_MEDIA_TEXT_KEYS = ["text", "caption", "alt", "title", "summary"] as const;
+const STRUCTURED_MEDIA_NESTED_KEYS = ["content", "parts", "items", "message", "messages"] as const;
 
 const CONDENSED_MIN_INPUT_RATIO = 0.1;
 
@@ -163,6 +168,140 @@ function dedupeOrderedIds(ids: Iterable<string>): string[] {
     }
   }
   return ordered;
+}
+
+/** Parse message-part metadata without throwing on malformed JSON. */
+function parseMessagePartMetadata(part: CreateMessagePartInput | { metadata: string | null }): Record<string, unknown> {
+  if (typeof part.metadata !== "string" || !part.metadata.trim()) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(part.metadata) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Detect whether a string is mostly binary/base64 payload and not meaningful prose. */
+function looksLikeBinaryPayload(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^data:[^;\s"'`]+;base64,/i.test(trimmed)) {
+    return true;
+  }
+  const compact = trimmed.replace(/\s+/g, "");
+  if (compact.length < 256 || compact.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[A-Za-z0-9+/=]+$/.test(compact)) {
+    return false;
+  }
+  return !/[ .,:;!?()[\]{}]/.test(trimmed);
+}
+
+/** Strip attachment payloads from plain strings before they reach the summarizer. */
+function stripEmbeddedMediaPayloads(content: string): string {
+  const withoutDataUrls = content.replace(EMBEDDED_DATA_URL_RE, "[embedded media omitted]");
+  const sanitizedLines = withoutDataUrls
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return false;
+      }
+      if (MEDIA_PATH_RE.test(trimmed)) {
+        return false;
+      }
+      if (looksLikeBinaryPayload(trimmed)) {
+        return false;
+      }
+      return true;
+    });
+  return sanitizedLines.join("\n").trim();
+}
+
+/** Extract human-readable text from structured content while ignoring attachment payload fields. */
+function extractSanitizedStructuredText(value: unknown, depth = 0): string[] {
+  if (depth >= 4 || value == null) {
+    return [];
+  }
+  if (typeof value === "string") {
+    const sanitized = stripEmbeddedMediaPayloads(value);
+    return sanitized ? [sanitized] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractSanitizedStructuredText(entry, depth + 1));
+  }
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const rawType = typeof record.type === "string" ? record.type.trim().toLowerCase() : "";
+  const textFragments: string[] = [];
+
+  for (const key of STRUCTURED_MEDIA_TEXT_KEYS) {
+    const candidate = record[key];
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const sanitized = stripEmbeddedMediaPayloads(candidate);
+    if (sanitized) {
+      textFragments.push(sanitized);
+    }
+  }
+
+  if (MEDIA_ATTACHMENT_RAW_TYPES.has(rawType)) {
+    return textFragments;
+  }
+
+  for (const key of STRUCTURED_MEDIA_NESTED_KEYS) {
+    textFragments.push(...extractSanitizedStructuredText(record[key], depth + 1));
+  }
+
+  return textFragments;
+}
+
+/** Normalize message content down to human-readable text, excluding binary/media payloads. */
+function extractMeaningfulMessageText(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if ((trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith("{") && trimmed.endsWith("}"))) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      const extracted = extractSanitizedStructuredText(parsed)
+        .map((fragment) => fragment.trim())
+        .filter(Boolean);
+      return extracted.join("\n").trim();
+    } catch {
+      // Fall back to plain-text sanitation below.
+    }
+  }
+  return stripEmbeddedMediaPayloads(content);
+}
+
+/** Identify whether a stored message part represents a media attachment. */
+function isMediaAttachmentPart(part: CreateMessagePartInput | { partType: string; metadata: string | null }): boolean {
+  if (MEDIA_ATTACHMENT_PART_TYPES.has(part.partType)) {
+    return true;
+  }
+  const metadata = parseMessagePartMetadata(part);
+  const rawType =
+    typeof metadata.rawType === "string"
+      ? metadata.rawType.trim().toLowerCase()
+      : metadata.raw && typeof metadata.raw === "object" && !Array.isArray(metadata.raw) &&
+          typeof (metadata.raw as Record<string, unknown>).type === "string"
+        ? ((metadata.raw as Record<string, unknown>).type as string).trim().toLowerCase()
+        : "";
+  return MEDIA_ATTACHMENT_RAW_TYPES.has(rawType);
 }
 
 // ── CompactionEngine ─────────────────────────────────────────────────────────
@@ -1086,10 +1225,9 @@ export class CompactionEngine {
    * attachments. This gives the summarizer enough context to produce a
    * meaningful summary instead of trying to compress raw file paths.
    *
-   * - Media-only messages (just a file path, no text): content is replaced
-   *   with "[Media attachment]" or "[Image attachment]" etc.
-   * - Media-mostly messages (any real text + attachment): content is annotated
-   *   with " [with media attachment]" suffix.
+   * - Media-only messages: content is replaced with "[Media attachment]".
+   * - Media-mostly messages: text is preserved and annotated with
+   *   " [with media attachment]".
    * - Text-only messages: returned unchanged.
    */
   private async annotateMediaContent(
@@ -1097,27 +1235,29 @@ export class CompactionEngine {
     content: string,
   ): Promise<string> {
     const parts = await this.conversationStore.getMessageParts(messageId);
-    const hasMediaParts = parts.some(
-      (p) => p.partType === "file" || p.partType === "snapshot",
-    );
+    const hasMediaParts = parts.some((part) => isMediaAttachmentPart(part));
     if (!hasMediaParts) {
       return content;
     }
 
-    // Strip MEDIA:/... paths to see how much actual text remains
-    const textWithoutPaths = content
-      .split("\n")
-      .filter((line) => !MEDIA_PATH_RE.test(line.trim()))
+    const partText = parts
+      .filter((part) => !isMediaAttachmentPart(part))
+      .map((part) => (typeof part.textContent === "string" ? part.textContent : ""))
+      .map((text) => stripEmbeddedMediaPayloads(text))
+      .map((text) => text.trim())
+      .filter(Boolean)
       .join("\n")
       .trim();
+    const fallbackText = extractMeaningfulMessageText(content);
+    const meaningfulText = (partText || fallbackText).trim();
 
-    if (textWithoutPaths.length === 0) {
-      // Media-only: replace with descriptive annotation
+    if (!meaningfulText) {
       return "[Media attachment]";
     }
-
-    // Media-mostly: keep the text, add annotation
-    return `${textWithoutPaths} [with media attachment]`;
+    if (meaningfulText.includes("[with media attachment]")) {
+      return meaningfulText;
+    }
+    return `${meaningfulText} [with media attachment]`;
   }
 
   // ── Private: Leaf Pass ───────────────────────────────────────────────────
