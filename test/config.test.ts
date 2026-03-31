@@ -12,6 +12,7 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.75);
     expect(config.freshTailCount).toBe(64);
     expect(config.incrementalMaxDepth).toBe(1);
+    expect(config.leafChunkTokens).toBe(20000);
     expect(config.leafMinFanout).toBe(8);
     expect(config.condensedMinFanout).toBe(4);
     expect(config.condensedMinFanoutHard).toBe(2);
@@ -26,6 +27,7 @@ describe("resolveLcmConfig", () => {
     const config = resolveLcmConfig({}, {
       contextThreshold: 0.5,
       freshTailCount: 16,
+      leafChunkTokens: 80000,
       incrementalMaxDepth: -1,
       ignoreSessionPatterns: ["agent:*:cron:*", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:ephemeral:**"],
@@ -45,6 +47,7 @@ describe("resolveLcmConfig", () => {
     expect(config.skipStatelessSessions).toBe(false);
     expect(config.contextThreshold).toBe(0.5);
     expect(config.freshTailCount).toBe(16);
+    expect(config.leafChunkTokens).toBe(80000);
     expect(config.incrementalMaxDepth).toBe(-1);
     expect(config.leafMinFanout).toBe(4);
     expect(config.condensedMinFanout).toBe(2);
@@ -110,12 +113,14 @@ describe("resolveLcmConfig", () => {
     const config = resolveLcmConfig({}, {
       contextThreshold: "0.6",
       freshTailCount: "24",
+      leafChunkTokens: "64000",
       ignoreSessionPatterns: "agent:*:cron:*, agent:main:subagent:**",
       statelessSessionPatterns: "agent:*:ephemeral:**, agent:main:preview:*",
       skipStatelessSessions: "false",
     });
     expect(config.contextThreshold).toBe(0.6);
     expect(config.freshTailCount).toBe(24);
+    expect(config.leafChunkTokens).toBe(64000);
     expect(config.ignoreSessionPatterns).toEqual([
       "agent:*:cron:*",
       "agent:main:subagent:**",
@@ -268,6 +273,13 @@ describe("resolveLcmConfig", () => {
   it("ships a manifest with expansionModel and expansionProvider in schema", () => {
     expect(manifest.configSchema.properties.expansionModel).toEqual({ type: "string" });
     expect(manifest.configSchema.properties.expansionProvider).toEqual({ type: "string" });
+  });
+
+  it("ships a manifest with leafChunkTokens in schema", () => {
+    expect(manifest.configSchema.properties.leafChunkTokens).toEqual({
+      type: "integer",
+      minimum: 1,
+    });
   });
 
   it("defaults summaryMaxOverageFactor to 3 and maxAssemblyTokenBudget to undefined", () => {
