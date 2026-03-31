@@ -780,8 +780,8 @@ describe("createLcmExpandQueryTool", () => {
     });
 
     let releaseWait!: () => void;
-    const waitGate = new Promise<{ status: string }>((resolve) => {
-      releaseWait = () => resolve({ status: "ok" });
+    const waitGate = new Promise<void>((resolve) => {
+      releaseWait = () => resolve();
     });
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string; params?: Record<string, unknown> };
@@ -789,7 +789,8 @@ describe("createLcmExpandQueryTool", () => {
         return { runId: `run-${callGatewayMock.mock.calls.length}` };
       }
       if (request.method === "agent.wait") {
-        return await waitGate;
+        await waitGate;
+        return { status: "ok" };
       }
       if (request.method === "sessions.get") {
         return {
