@@ -10,8 +10,9 @@ import { ConversationStore } from "../src/store/conversation-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
+import type { LcmDependencies } from "../src/types.js";
 
-function createCommandFixture(options?: { summarize?: LcmSummarizeFn }) {
+function createCommandFixture(options?: { summarize?: LcmSummarizeFn; deps?: LcmDependencies }) {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-command-"));
   const dbPath = join(tempDir, "lcm.db");
   const db = createLcmDatabaseConnection(dbPath);
@@ -20,7 +21,12 @@ function createCommandFixture(options?: { summarize?: LcmSummarizeFn }) {
   const conversationStore = new ConversationStore(db, { fts5Available });
   const summaryStore = new SummaryStore(db, { fts5Available });
   const config = resolveLcmConfig({}, { dbPath });
-  const command = createLcmCommand({ db, config, summarize: options?.summarize });
+  const command = createLcmCommand({
+    db,
+    config,
+    summarize: options?.summarize,
+    deps: options?.deps,
+  });
   return { tempDir, dbPath, command, conversationStore, summaryStore };
 }
 
@@ -308,6 +314,8 @@ describe("lcm command", () => {
     expect(result.text).toContain("truncated-marker summaries: 1");
     expect(result.text).toContain("result: issues found");
     expect(result.text).toContain("sum_current_new (new), sum_current_old (old)");
+    expect(result.text).toContain("**🛠️ Next step**");
+    expect(result.text).toContain("`/lossless doctor apply` repairs these in place for the current conversation.");
     expect(result.text).not.toContain("sum_other_new");
     expect(result.text).not.toContain(`conversation id: ${otherConversation.conversationId}`);
   });
@@ -543,6 +551,97 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("detected summaries:");
     expect(summarize).not.toHaveBeenCalled();
     expect(untouched?.content).toContain("[Truncated from 204 tokens]");
+  });
+
+  it("uses the normal runtime model chain for doctor apply when no explicit summary model is set", async () => {
+    const runtimeComplete = vi.fn(async () => ({
+      content: [{ type: "text", text: "RUNTIME REPAIR" }],
+    }));
+    const config = resolveLcmConfig({}, { dbPath: "/tmp/unused.db" });
+    const deps: LcmDependencies = {
+      config,
+      complete: runtimeComplete as LcmDependencies["complete"],
+      callGateway: vi.fn(async () => ({})) as LcmDependencies["callGateway"],
+      resolveModel: vi.fn((modelRef?: string) => {
+        const [provider, model] = String(modelRef ?? "anthropic/claude-haiku-4-5").split("/", 2);
+        return { provider, model };
+      }) as LcmDependencies["resolveModel"],
+      getApiKey: vi.fn(async () => "test-api-key") as LcmDependencies["getApiKey"],
+      requireApiKey: vi.fn(async () => "test-api-key") as LcmDependencies["requireApiKey"],
+      parseAgentSessionKey: vi.fn(() => ({ agentId: "main", suffix: "test" })) as LcmDependencies["parseAgentSessionKey"],
+      isSubagentSessionKey: vi.fn(() => false) as LcmDependencies["isSubagentSessionKey"],
+      normalizeAgentId: vi.fn((id?: string) => id?.trim() || "main") as LcmDependencies["normalizeAgentId"],
+      buildSubagentSystemPrompt: vi.fn(() => "subagent prompt") as LcmDependencies["buildSubagentSystemPrompt"],
+      readLatestAssistantReply: vi.fn(() => undefined) as LcmDependencies["readLatestAssistantReply"],
+      resolveAgentDir: vi.fn(() => tmpdir()) as LcmDependencies["resolveAgentDir"],
+      resolveSessionIdFromSessionKey: vi.fn(async () => undefined) as LcmDependencies["resolveSessionIdFromSessionKey"],
+      agentLaneSubagent: "subagent",
+      log: {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      },
+    };
+
+    const fixture = createCommandFixture({ deps });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-runtime-config",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-runtime-config",
+    });
+    const [message] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "runtime-config-backed broken message",
+        tokenCount: 7,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_runtime_fix",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `broken leaf\n${"[Truncated from 111 tokens]"}`,
+      tokenCount: 10,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_runtime_fix", [message.messageId]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-runtime-config",
+        config: {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-haiku-4-5",
+            },
+          },
+          plugins: {
+            entries: {
+              "lossless-claw": {
+                enabled: true,
+              },
+            },
+            slots: {
+              contextEngine: "lossless-claw",
+            },
+          },
+        },
+      }),
+    );
+
+    const repaired = await fixture.summaryStore.getSummary("sum_runtime_fix");
+
+    expect(result.text).toContain("repaired summaries: 1");
+    expect(result.text).not.toContain("could not resolve a summarizer");
+    expect(runtimeComplete).toHaveBeenCalled();
+    expect(repaired?.content).toContain("RUNTIME REPAIR");
+    expect(repaired?.content).not.toContain("[Truncated from 111 tokens]");
   });
 
   it("falls back to help text for unsupported subcommands", async () => {

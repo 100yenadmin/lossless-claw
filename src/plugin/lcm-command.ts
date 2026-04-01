@@ -539,6 +539,10 @@ async function buildDoctorText(params: {
     lines.push(
       "",
       buildSection("🧷 Affected summaries", [summaryList]),
+      "",
+      buildSection("🛠️ Next step", [
+        `${formatCommand(`${VISIBLE_COMMAND} doctor apply`)} repairs these in place for the current conversation.`,
+      ]),
     );
   }
 
@@ -577,6 +581,7 @@ async function buildDoctorApplyText(params: {
       conversationId: current.stats.conversationId,
       deps: params.deps,
       summarize: params.summarize,
+      runtimeConfig: params.ctx.config,
     });
   } catch (error) {
     return [

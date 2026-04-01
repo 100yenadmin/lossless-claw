@@ -50,6 +50,7 @@ export async function applyScopedDoctorRepair(params: {
   conversationId: number;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
+  runtimeConfig?: unknown;
 }): Promise<DoctorApplyResult> {
   const targets = loadDoctorTargets(params.db, params.conversationId);
   if (targets.length === 0) {
@@ -67,7 +68,7 @@ export async function applyScopedDoctorRepair(params: {
   if (!summarize) {
     return {
       kind: "unavailable",
-      reason: "No LCM summary model is configured for native doctor apply.",
+      reason: "Lossless Claw could not resolve a summarizer for native doctor apply through the normal model/auth chain.",
     };
   }
 
@@ -175,6 +176,7 @@ async function resolveDoctorApplySummarize(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
+  runtimeConfig?: unknown;
 }): Promise<LcmSummarizeFn | undefined> {
   if (typeof params.summarize === "function") {
     return params.summarize;
@@ -185,7 +187,10 @@ async function resolveDoctorApplySummarize(params: {
 
   const runtimeSummarizer = await createLcmSummarizeFromLegacyParams({
     deps: params.deps,
-    legacyParams: {},
+    legacyParams: {
+      config: params.runtimeConfig,
+      agentDir: params.deps.resolveAgentDir(),
+    },
     customInstructions: params.config.customInstructions || undefined,
   });
   return runtimeSummarizer?.fn;
