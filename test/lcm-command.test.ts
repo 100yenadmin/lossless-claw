@@ -131,7 +131,7 @@ describe("lcm command", () => {
     expect(result.text).toContain("warning (1 issue; run `/lossless doctor`)");
     expect(result.text).toContain("📍 CURRENT CONVERSATION");
     expect(result.text).toContain("status                   unavailable");
-    expect(result.text).toContain("OpenClaw plugin commands do not expose the active session key or session id here");
+    expect(result.text).toContain("OpenClaw did not expose an active session key or session id here");
   });
 
   it("resolves current conversation stats when the host provides a session key", async () => {
@@ -189,6 +189,67 @@ describe("lcm command", () => {
     expect(result.text).toContain("stored summary tokens    21");
     expect(result.text).toContain("summarized source tokens 21");
     expect(result.text).toContain("doctor                   1 issue(s) in this conversation");
+  });
+
+  it("falls back to the active session id when the current session key is not stored yet", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "fallback-session-id",
+      title: "Fallback conversation fixture",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "fallback message",
+        tokenCount: 5,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext(undefined, {
+        sessionKey: "agent:main:telegram:direct:not-yet-stored",
+        sessionId: "fallback-session-id",
+      }),
+    );
+
+    expect(result.text).toContain("📍 CURRENT CONVERSATION");
+    expect(result.text).toContain(
+      "status                   resolved from active session key via session id fallback",
+    );
+    expect(result.text).toContain(`conversation id          ${conversation.conversationId}`);
+    expect(result.text).toContain("session id               fallback-session-id");
+    expect(result.text).toContain("session key              missing");
+    expect(result.text).toContain("messages                 1");
+  });
+
+  it("refuses session id fallback when it resolves to a different stored session key", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    await fixture.conversationStore.createConversation({
+      sessionId: "mismatch-session-id",
+      sessionKey: "agent:main:telegram:direct:stored",
+      title: "Mismatched fallback fixture",
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext(undefined, {
+        sessionKey: "agent:main:telegram:direct:active",
+        sessionId: "mismatch-session-id",
+      }),
+    );
+
+    expect(result.text).toContain("📍 CURRENT CONVERSATION");
+    expect(result.text).toContain("status                   unavailable");
+    expect(result.text).toContain("Active session key `agent:main:telegram:direct:active` is not stored in LCM yet.");
+    expect(result.text).toContain("but it is bound to `agent:main:telegram:direct:stored`, so GLOBAL stats are safer.");
+    expect(result.text).toContain("fallback                 Showing GLOBAL stats only.");
   });
 
   it("reports doctor scan counts grouped by conversation", async () => {

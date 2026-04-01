@@ -59,7 +59,7 @@ type LcmConversationStatusStats = {
 type CurrentConversationResolution =
   | {
       kind: "resolved";
-      source: "session_key" | "session_id" | "binding_target_session_key";
+      source: "session_key" | "session_key_via_session_id" | "session_id";
       stats: LcmConversationStatusStats;
     }
   | {
@@ -345,83 +345,101 @@ function getConversationStatusStats(
   };
 }
 
-function readHiddenString(
-  value: unknown,
-  key: "sessionId" | "sessionKey" | "targetSessionKey",
-): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
+function normalizeIdentity(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function getConversationStatusBySessionKey(
+  db: DatabaseSync,
+  sessionKey: string,
+): LcmConversationStatusStats | null {
+  const row = db
+    .prepare(`SELECT conversation_id FROM conversations WHERE session_key = ? LIMIT 1`)
+    .get(sessionKey) as { conversation_id: number } | undefined;
+
+  if (!row) {
+    return null;
   }
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+
+  return getConversationStatusStats(db, row.conversation_id);
+}
+
+function getConversationStatusBySessionId(
+  db: DatabaseSync,
+  sessionId: string,
+): LcmConversationStatusStats | null {
+  const row = db
+    .prepare(
+      `SELECT conversation_id
+       FROM conversations
+       WHERE session_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(sessionId) as { conversation_id: number } | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return getConversationStatusStats(db, row.conversation_id);
 }
 
 async function resolveCurrentConversation(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
 }): Promise<CurrentConversationResolution> {
-  const hiddenSessionKey = readHiddenString(params.ctx, "sessionKey");
-  if (hiddenSessionKey) {
-    const row = params.db
-      .prepare(`SELECT conversation_id FROM conversations WHERE session_key = ? LIMIT 1`)
-      .get(hiddenSessionKey) as { conversation_id: number } | undefined;
-    if (row) {
-      const stats = getConversationStatusStats(params.db, row.conversation_id);
-      if (stats) {
-        return { kind: "resolved", source: "session_key", stats };
+  const sessionKey = normalizeIdentity(params.ctx.sessionKey);
+  const sessionId = normalizeIdentity(params.ctx.sessionId);
+
+  if (sessionKey) {
+    const bySessionKey = getConversationStatusBySessionKey(params.db, sessionKey);
+    if (bySessionKey) {
+      return { kind: "resolved", source: "session_key", stats: bySessionKey };
+    }
+
+    if (sessionId) {
+      const bySessionId = getConversationStatusBySessionId(params.db, sessionId);
+      if (bySessionId) {
+        if (!bySessionId.sessionKey || bySessionId.sessionKey === sessionKey) {
+          return {
+            kind: "resolved",
+            source: "session_key_via_session_id",
+            stats: bySessionId,
+          };
+        }
+
+        return {
+          kind: "unavailable",
+          reason: `Active session key ${formatCommand(sessionKey)} is not stored in LCM yet. Session id fallback found conversation #${formatNumber(bySessionId.conversationId)}, but it is bound to ${formatCommand(bySessionId.sessionKey)}, so GLOBAL stats are safer.`,
+        };
       }
     }
+
     return {
       kind: "unavailable",
-      reason: "No LCM conversation is stored yet for the active session key.",
+      reason: sessionId
+        ? `No LCM conversation is stored yet for active session key ${formatCommand(sessionKey)} or active session id ${formatCommand(sessionId)}.`
+        : `No LCM conversation is stored yet for active session key ${formatCommand(sessionKey)}.`,
     };
   }
 
-  const hiddenSessionId = readHiddenString(params.ctx, "sessionId");
-  if (hiddenSessionId) {
-    const row = params.db
-      .prepare(
-        `SELECT conversation_id
-         FROM conversations
-         WHERE session_id = ?
-         ORDER BY created_at DESC
-         LIMIT 1`,
-      )
-      .get(hiddenSessionId) as { conversation_id: number } | undefined;
-    if (row) {
-      const stats = getConversationStatusStats(params.db, row.conversation_id);
-      if (stats) {
-        return { kind: "resolved", source: "session_id", stats };
-      }
+  if (sessionId) {
+    const bySessionId = getConversationStatusBySessionId(params.db, sessionId);
+    if (bySessionId) {
+      return { kind: "resolved", source: "session_id", stats: bySessionId };
     }
-    return {
-      kind: "unavailable",
-      reason: "No LCM conversation is stored yet for the active session id.",
-    };
-  }
 
-  const binding = await params.ctx.getCurrentConversationBinding();
-  const bindingTargetSessionKey = readHiddenString(binding, "targetSessionKey");
-  if (bindingTargetSessionKey) {
-    const row = params.db
-      .prepare(`SELECT conversation_id FROM conversations WHERE session_key = ? LIMIT 1`)
-      .get(bindingTargetSessionKey) as { conversation_id: number } | undefined;
-    if (row) {
-      const stats = getConversationStatusStats(params.db, row.conversation_id);
-      if (stats) {
-        return { kind: "resolved", source: "binding_target_session_key", stats };
-      }
-    }
     return {
       kind: "unavailable",
-      reason: "The current plugin binding points at a session key with no stored LCM conversation yet.",
+      reason: `OpenClaw did not expose an active session key here. Tried active session id ${formatCommand(sessionId)}, but no stored LCM conversation matched it.`,
     };
   }
 
   return {
     kind: "unavailable",
-    reason:
-      "OpenClaw plugin commands do not expose the active session key or session id here, so only GLOBAL stats are available.",
+    reason: "OpenClaw did not expose an active session key or session id here, so only GLOBAL stats are available.",
   };
 }
 
@@ -467,7 +485,7 @@ function buildHelpText(error?: string): string {
     "",
     buildSection("📘 Commands", [
       buildStatLine(formatCommand(VISIBLE_COMMAND), "Show compact status output."),
-      buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, GLOBAL, and current-session status."),
+      buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, GLOBAL, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
     ]),
     "",
@@ -532,7 +550,12 @@ async function buildStatusText(params: {
       };
     lines.push(
       buildSection("📍 CURRENT CONVERSATION", [
-        buildStatLine("status", `resolved via ${current.source.replaceAll("_", " ")}`),
+        buildStatLine(
+          "status",
+          current.source === "session_key_via_session_id"
+            ? "resolved from active session key via session id fallback"
+            : `resolved via ${current.source.replaceAll("_", " ")}`,
+        ),
         buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
         buildStatLine("session id", truncateMiddle(current.stats.sessionId, 28)),
         buildStatLine(
