@@ -157,6 +157,14 @@ describe("lcm plugin registration", () => {
     });
 
     lcmPlugin.register(api);
+    expect(api.registerCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "lcm",
+        nativeNames: expect.objectContaining({
+          default: "lossless",
+        }),
+      }),
+    );
 
     const factory = getFactory();
     expect(factory).toBeTypeOf("function");

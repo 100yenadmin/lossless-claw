@@ -7,6 +7,7 @@ Lossless Context Management plugin for [OpenClaw](https://github.com/openclaw/op
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
+- [Commands And Skill](#commands-and-skill)
 - [Documentation](#documentation)
 - [Development](#development)
 - [License](#license)
@@ -26,6 +27,16 @@ When a conversation grows beyond the model's context window, OpenClaw (just like
 Nothing is lost. Raw messages stay in the database. Summaries link back to their source messages. Agents can drill into any summary to recover the original detail.
 
 **It feels like talking to an agent that never forgets. Because it doesn't. In normal operation, you'll never need to think about compaction again.**
+
+## Commands And Skill
+
+The plugin now ships a bundled `lossless-claw` skill plus a small native command surface:
+
+- `/lcm` shows version, enablement/selection state, DB path and size, summary counts, and summary-health status
+- `/lcm doctor` scans for broken or truncated summaries
+- `/lossless` is an alias for `/lcm` on native command surfaces
+
+The bundled skill focuses on configuration, diagnostics, architecture, and recall-tool usage. Its reference set lives under `skills/lossless-claw/references/`.
 
 ## Quick start
 

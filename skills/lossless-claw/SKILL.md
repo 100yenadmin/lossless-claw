@@ -1,0 +1,30 @@
+---
+name: lossless-claw
+description: Configure, diagnose, and use lossless-claw effectively in OpenClaw, with emphasis on key settings, summary health, and recall-tool usage.
+---
+
+# Lossless Claw
+
+Use this skill when the task is about operating, tuning, or debugging the `lossless-claw` OpenClaw plugin.
+
+Start here:
+
+1. Confirm whether the user needs configuration help, diagnostics, or recall-tool guidance.
+2. If they need a quick health check, tell them to run `/lcm`.
+3. If they suspect summary corruption or truncation, use `/lcm doctor`.
+4. Load the relevant reference file instead of improvising details from memory.
+
+Reference map:
+
+- Configuration: `references/config.md`
+- Internal model and data flow: `references/architecture.md`
+- Diagnostics and summary-health workflow: `references/diagnostics.md`
+- Recall tools and when to use them: `references/recall-tools.md`
+
+Working rules:
+
+- Prioritize explaining why a setting matters, not just what it does.
+- Prefer the native plugin command surface for MVP workflows.
+- Do not assume the Go TUI is installed.
+- Do not recommend advanced rewrite/backfill/transplant/dissolve flows unless the user explicitly asks for non-MVP internals.
+- For exact evidence retrieval from compacted history, guide the user toward recall tools instead of guessing from summaries.

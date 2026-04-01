@@ -1,5 +1,8 @@
 {
   "id": "lossless-claw",
+  "skills": [
+    "skills/lossless-claw"
+  ],
   "uiHints": {
     "contextThreshold": {
       "label": "Context Threshold",

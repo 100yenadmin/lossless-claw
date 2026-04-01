@@ -15,6 +15,7 @@ import { createLcmDescribeTool } from "../tools/lcm-describe-tool.js";
 import { createLcmExpandQueryTool } from "../tools/lcm-expand-query-tool.js";
 import { createLcmExpandTool } from "../tools/lcm-expand-tool.js";
 import { createLcmGrepTool } from "../tools/lcm-grep-tool.js";
+import { createLcmCommand } from "./lcm-command.js";
 import type { LcmDependencies } from "../types.js";
 
 /** Parse `agent:<agentId>:<suffix...>` session keys. */
@@ -1552,6 +1553,12 @@ const lcmPlugin = {
         lcm,
         sessionKey: ctx.sessionKey,
         requesterSessionKey: ctx.sessionKey,
+      }),
+    );
+    api.registerCommand(
+      createLcmCommand({
+        db: database,
+        config: deps.config,
       }),
     );
 

@@ -3,6 +3,10 @@ import manifest from "../openclaw.plugin.json" with { type: "json" };
 import { resolveLcmConfig } from "../src/db/config.js";
 
 describe("resolveLcmConfig", () => {
+  it("ships the bundled lossless-claw skill path in the manifest", () => {
+    expect(manifest.skills).toEqual(["skills/lossless-claw"]);
+  });
+
   it("uses hardcoded defaults when no env or plugin config", () => {
     const config = resolveLcmConfig({}, {});
     expect(config.enabled).toBe(true);
