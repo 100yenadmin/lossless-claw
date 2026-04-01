@@ -8,6 +8,8 @@ const FALLBACK_SUMMARY_MARKER = "[LCM fallback summary; truncated for context ma
 const TRUNCATED_SUMMARY_PREFIX = "[Truncated from ";
 const TRUNCATED_SUMMARY_WINDOW = 40;
 const FALLBACK_SUMMARY_WINDOW = 80;
+const VISIBLE_COMMAND = "/lossless";
+const HIDDEN_ALIAS = "/lcm";
 
 type DoctorMarkerKind = "old" | "new" | "fallback";
 
@@ -41,6 +43,29 @@ type LcmStatusStats = {
   leafSummaryCount: number;
   condensedSummaryCount: number;
 };
+
+type LcmConversationStatusStats = {
+  conversationId: number;
+  sessionId: string;
+  sessionKey: string | null;
+  messageCount: number;
+  summaryCount: number;
+  storedSummaryTokens: number;
+  summarizedSourceTokens: number;
+  leafSummaryCount: number;
+  condensedSummaryCount: number;
+};
+
+type CurrentConversationResolution =
+  | {
+      kind: "resolved";
+      source: "session_key" | "session_id" | "binding_target_session_key";
+      stats: LcmConversationStatusStats;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+    };
 
 type ParsedLcmCommand =
   | { kind: "status" }
@@ -77,6 +102,45 @@ function formatBytes(bytes: number): string {
   }
   const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
   return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function formatCommand(command: string): string {
+  return `\`${command}\``;
+}
+
+function buildHeaderLines(): string[] {
+  return [
+    `🦀 Lossless Claw v${packageJson.version}`,
+    `Help: ${formatCommand(`${VISIBLE_COMMAND} help`)} · Hidden alias: ${formatCommand(HIDDEN_ALIAS)}`,
+  ];
+}
+
+function buildSection(title: string, lines: string[]): string {
+  return [title, ...lines.map((line) => `  ${line}`)].join("\n");
+}
+
+function buildStatLine(label: string, value: string): string {
+  return `${label.padEnd(24, " ")} ${value}`;
+}
+
+function buildDoctorBadge(params: { total: number; command: string }): string {
+  if (params.total === 0) {
+    return "clean";
+  }
+  const issueLabel = params.total === 1 ? "issue" : "issues";
+  return `warning (${formatNumber(params.total)} ${issueLabel}; run ${formatCommand(params.command)})`;
+}
+
+function truncateMiddle(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  if (maxChars <= 3) {
+    return value.slice(0, maxChars);
+  }
+  const head = Math.ceil((maxChars - 1) / 2);
+  const tail = Math.floor((maxChars - 1) / 2);
+  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
 
 function splitArgs(rawArgs: string | undefined): string[] {
@@ -231,6 +295,136 @@ function getLcmStatusStats(db: DatabaseSync): LcmStatusStats {
   };
 }
 
+function getConversationStatusStats(
+  db: DatabaseSync,
+  conversationId: number,
+): LcmConversationStatusStats | null {
+  const row = db
+    .prepare(
+      `SELECT
+         c.conversation_id,
+         c.session_id,
+         c.session_key,
+         COALESCE((SELECT COUNT(*) FROM messages WHERE conversation_id = c.conversation_id), 0) AS message_count,
+         COALESCE((SELECT COUNT(*) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS summary_count,
+         COALESCE((SELECT SUM(token_count) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS stored_summary_tokens,
+         COALESCE((SELECT SUM(CASE WHEN kind = 'leaf' THEN source_message_token_count ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS summarized_source_tokens,
+         COALESCE((SELECT SUM(CASE WHEN kind = 'leaf' THEN 1 ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS leaf_summary_count,
+         COALESCE((SELECT SUM(CASE WHEN kind = 'condensed' THEN 1 ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS condensed_summary_count
+       FROM conversations c
+       WHERE c.conversation_id = ?`,
+    )
+    .get(conversationId) as
+    | {
+        conversation_id: number;
+        session_id: string;
+        session_key: string | null;
+        message_count: number;
+        summary_count: number;
+        stored_summary_tokens: number;
+        summarized_source_tokens: number;
+        leaf_summary_count: number;
+        condensed_summary_count: number;
+      }
+    | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    conversationId: row.conversation_id,
+    sessionId: row.session_id,
+    sessionKey: row.session_key,
+    messageCount: row.message_count,
+    summaryCount: row.summary_count,
+    storedSummaryTokens: row.stored_summary_tokens,
+    summarizedSourceTokens: row.summarized_source_tokens,
+    leafSummaryCount: row.leaf_summary_count,
+    condensedSummaryCount: row.condensed_summary_count,
+  };
+}
+
+function readHiddenString(
+  value: unknown,
+  key: "sessionId" | "sessionKey" | "targetSessionKey",
+): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const raw = (value as Record<string, unknown>)[key];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+async function resolveCurrentConversation(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+}): Promise<CurrentConversationResolution> {
+  const hiddenSessionKey = readHiddenString(params.ctx, "sessionKey");
+  if (hiddenSessionKey) {
+    const row = params.db
+      .prepare(`SELECT conversation_id FROM conversations WHERE session_key = ? LIMIT 1`)
+      .get(hiddenSessionKey) as { conversation_id: number } | undefined;
+    if (row) {
+      const stats = getConversationStatusStats(params.db, row.conversation_id);
+      if (stats) {
+        return { kind: "resolved", source: "session_key", stats };
+      }
+    }
+    return {
+      kind: "unavailable",
+      reason: "No LCM conversation is stored yet for the active session key.",
+    };
+  }
+
+  const hiddenSessionId = readHiddenString(params.ctx, "sessionId");
+  if (hiddenSessionId) {
+    const row = params.db
+      .prepare(
+        `SELECT conversation_id
+         FROM conversations
+         WHERE session_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get(hiddenSessionId) as { conversation_id: number } | undefined;
+    if (row) {
+      const stats = getConversationStatusStats(params.db, row.conversation_id);
+      if (stats) {
+        return { kind: "resolved", source: "session_id", stats };
+      }
+    }
+    return {
+      kind: "unavailable",
+      reason: "No LCM conversation is stored yet for the active session id.",
+    };
+  }
+
+  const binding = await params.ctx.getCurrentConversationBinding();
+  const bindingTargetSessionKey = readHiddenString(binding, "targetSessionKey");
+  if (bindingTargetSessionKey) {
+    const row = params.db
+      .prepare(`SELECT conversation_id FROM conversations WHERE session_key = ? LIMIT 1`)
+      .get(bindingTargetSessionKey) as { conversation_id: number } | undefined;
+    if (row) {
+      const stats = getConversationStatusStats(params.db, row.conversation_id);
+      if (stats) {
+        return { kind: "resolved", source: "binding_target_session_key", stats };
+      }
+    }
+    return {
+      kind: "unavailable",
+      reason: "The current plugin binding points at a session key with no stored LCM conversation yet.",
+    };
+  }
+
+  return {
+    kind: "unavailable",
+    reason:
+      "OpenClaw plugin commands do not expose the active session key or session id here, so only GLOBAL stats are available.",
+  };
+}
+
 function resolvePluginEnabled(config: unknown): boolean {
   const root = asRecord(config);
   const plugins = asRecord(root?.plugins);
@@ -268,42 +462,107 @@ function resolveDbSizeLabel(dbPath: string): string {
 
 function buildHelpText(error?: string): string {
   const lines = [
-    ...(error ? [error, ""] : []),
-    "Lossless Claw command surface",
+    ...(error ? [`⚠️ ${error}`, ""] : []),
+    ...buildHeaderLines(),
     "",
-    "- `/lcm` or `/lcm status` shows plugin and database health.",
-    "- `/lcm doctor` scans for broken or truncated summaries.",
-    "- `/lossless` is an alias for `/lcm` on native command surfaces.",
+    buildSection("📘 Commands", [
+      buildStatLine(formatCommand(VISIBLE_COMMAND), "Show compact status output."),
+      buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, GLOBAL, and current-session status."),
+      buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
+    ]),
+    "",
+    buildSection("🧭 Notes", [
+      buildStatLine("subcommands", `Discover them with ${formatCommand(`${VISIBLE_COMMAND} help`)}.`),
+      buildStatLine("short alias", `${formatCommand(HIDDEN_ALIAS)} is still accepted but intentionally hidden from native menus.`),
+      buildStatLine("current conversation", "Uses the active LCM session when the host exposes session identity."),
+    ]),
   ];
   return lines.join("\n");
 }
 
-function buildStatusText(params: {
+async function buildStatusText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
   config: LcmConfig;
-}): string {
+}): Promise<string> {
   const status = getLcmStatusStats(params.db);
   const doctor = getDoctorSummaryStats(params.db);
   const enabled = resolvePluginEnabled(params.ctx.config);
   const selected = resolvePluginSelected(params.ctx.config);
   const slot = resolveContextEngineSlot(params.ctx.config);
   const dbSize = resolveDbSizeLabel(params.config.databasePath);
+  const current = await resolveCurrentConversation({
+    ctx: params.ctx,
+    db: params.db,
+  });
 
   const lines = [
-    "Lossless Claw",
+    ...buildHeaderLines(),
     "",
-    `version: ${packageJson.version}`,
-    `enabled: ${formatBoolean(enabled)}`,
-    `selected: ${formatBoolean(selected)}${slot ? ` (slot=${slot})` : " (slot=unset)"}`,
-    `db path: ${params.config.databasePath}`,
-    `db size: ${dbSize}`,
-    `conversations: ${formatNumber(status.conversationCount)}`,
-    `summaries: ${formatNumber(status.summaryCount)} (${formatNumber(status.leafSummaryCount)} leaf, ${formatNumber(status.condensedSummaryCount)} condensed)`,
-    `stored summary tokens: ${formatNumber(status.storedSummaryTokens)}`,
-    `summarized source tokens: ${formatNumber(status.summarizedSourceTokens)}`,
-    `broken or truncated summaries: ${formatBoolean(doctor.total > 0)}${doctor.total > 0 ? ` (${formatNumber(doctor.total)} detected; run /lcm doctor)` : ""}`,
+    buildSection("🧩 Plugin", [
+      buildStatLine("enabled", formatBoolean(enabled)),
+      buildStatLine("selected", `${formatBoolean(selected)}${slot ? ` (slot=${slot})` : " (slot=unset)"}`),
+      buildStatLine("db path", params.config.databasePath),
+      buildStatLine("db size", dbSize),
+    ]),
+    "",
+    buildSection("🌐 GLOBAL", [
+      buildStatLine("conversations", formatNumber(status.conversationCount)),
+      buildStatLine(
+        "summaries",
+        `${formatNumber(status.summaryCount)} (${formatNumber(status.leafSummaryCount)} leaf, ${formatNumber(status.condensedSummaryCount)} condensed)`,
+      ),
+      buildStatLine("stored summary tokens", formatNumber(status.storedSummaryTokens)),
+      buildStatLine("summarized source tokens", formatNumber(status.summarizedSourceTokens)),
+      buildStatLine(
+        "doctor",
+        buildDoctorBadge({ total: doctor.total, command: `${VISIBLE_COMMAND} doctor` }),
+      ),
+    ]),
+    "",
   ];
+
+  if (current.kind === "resolved") {
+    const conversationDoctor =
+      doctor.byConversation.get(current.stats.conversationId) ?? {
+        total: 0,
+        old: 0,
+        truncated: 0,
+        fallback: 0,
+      };
+    lines.push(
+      buildSection("📍 CURRENT CONVERSATION", [
+        buildStatLine("status", `resolved via ${current.source.replaceAll("_", " ")}`),
+        buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+        buildStatLine("session id", truncateMiddle(current.stats.sessionId, 28)),
+        buildStatLine(
+          "session key",
+          current.stats.sessionKey ? truncateMiddle(current.stats.sessionKey, 44) : "missing",
+        ),
+        buildStatLine("messages", formatNumber(current.stats.messageCount)),
+        buildStatLine(
+          "summaries",
+          `${formatNumber(current.stats.summaryCount)} (${formatNumber(current.stats.leafSummaryCount)} leaf, ${formatNumber(current.stats.condensedSummaryCount)} condensed)`,
+        ),
+        buildStatLine("stored summary tokens", formatNumber(current.stats.storedSummaryTokens)),
+        buildStatLine("summarized source tokens", formatNumber(current.stats.summarizedSourceTokens)),
+        buildStatLine(
+          "doctor",
+          conversationDoctor.total > 0
+            ? `${formatNumber(conversationDoctor.total)} issue(s) in this conversation`
+            : "clean",
+        ),
+      ]),
+    );
+  } else {
+    lines.push(
+      buildSection("📍 CURRENT CONVERSATION", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+        buildStatLine("fallback", "Showing GLOBAL stats only."),
+      ]),
+    );
+  }
 
   return lines.join("\n");
 }
@@ -312,21 +571,25 @@ function buildDoctorText(db: DatabaseSync): string {
   const stats = getDoctorSummaryStats(db);
   if (stats.total === 0) {
     return [
-      "Lossless Claw doctor",
+      "🩺 Lossless Claw Doctor",
       "",
-      "No broken or truncated summaries detected.",
+      `No broken or truncated summaries detected. See ${formatCommand(`${VISIBLE_COMMAND} help`)} for command docs.`,
     ].join("\n");
   }
 
   const lines = [
-    "Lossless Claw doctor",
+    ...buildHeaderLines(),
     "",
-    `detected summaries: ${formatNumber(stats.total)}`,
-    `old-marker summaries: ${formatNumber(stats.old)}`,
-    `truncated-marker summaries: ${formatNumber(stats.truncated)}`,
-    `fallback-marker summaries: ${formatNumber(stats.fallback)}`,
+    "🩺 Lossless Claw Doctor",
     "",
-    "affected conversations:",
+    buildSection("🧪 Scan", [
+      buildStatLine("detected summaries", formatNumber(stats.total)),
+      buildStatLine("old-marker summaries", formatNumber(stats.old)),
+      buildStatLine("truncated-marker summaries", formatNumber(stats.truncated)),
+      buildStatLine("fallback-marker summaries", formatNumber(stats.fallback)),
+    ]),
+    "",
+    "💬 Affected Conversations",
   ];
 
   const conversations = [...stats.byConversation.entries()].sort((left, right) => {
@@ -338,12 +601,12 @@ function buildDoctorText(db: DatabaseSync): string {
 
   for (const [conversationId, counts] of conversations.slice(0, 10)) {
     lines.push(
-      `- ${conversationId}: ${formatNumber(counts.total)} total (${formatNumber(counts.old)} old, ${formatNumber(counts.truncated)} truncated, ${formatNumber(counts.fallback)} fallback)`,
+      `  #${formatNumber(conversationId)} · ${formatNumber(counts.total)} total · ${formatNumber(counts.old)} old · ${formatNumber(counts.truncated)} truncated · ${formatNumber(counts.fallback)} fallback`,
     );
   }
 
   if (conversations.length > 10) {
-    lines.push(`- +${formatNumber(conversations.length - 10)} more conversations`);
+    lines.push(`  +${formatNumber(conversations.length - 10)} more conversations`);
   }
 
   return lines.join("\n");
@@ -364,7 +627,7 @@ export function createLcmCommand(params: {
       const parsed = parseLcmCommand(ctx.args);
       switch (parsed.kind) {
         case "status":
-          return { text: buildStatusText({ ctx, db: params.db, config: params.config }) };
+          return { text: await buildStatusText({ ctx, db: params.db, config: params.config }) };
         case "doctor":
           return { text: buildDoctorText(params.db) };
         case "help":
@@ -379,6 +642,8 @@ export const __testing = {
   detectDoctorMarker,
   getDoctorSummaryStats,
   getLcmStatusStats,
+  getConversationStatusStats,
+  resolveCurrentConversation,
   resolveContextEngineSlot,
   resolvePluginEnabled,
   resolvePluginSelected,
