@@ -4,10 +4,6 @@
     "skills/lossless-claw"
   ],
   "uiHints": {
-    "enabled": {
-      "label": "Enabled",
-      "help": "Enable or disable lossless-claw without uninstalling it"
-    },
     "contextThreshold": {
       "label": "Context Threshold",
       "help": "Fraction of context window that triggers compaction (0.0–1.0)"
@@ -44,25 +40,9 @@
       "label": "Max Expand Tokens",
       "help": "Token cap for lcm_expand_query expansion calls"
     },
-    "leafMinFanout": {
-      "label": "Leaf Min Fanout",
-      "help": "Minimum number of raw messages required before a leaf compaction pass runs"
-    },
-    "condensedMinFanout": {
-      "label": "Condensed Min Fanout",
-      "help": "Number of same-depth summaries required before condensation is attempted"
-    },
-    "condensedMinFanoutHard": {
-      "label": "Condensed Min Fanout Hard",
-      "help": "Hard floor for condensation grouping during maintenance and repair flows"
-    },
     "dbPath": {
       "label": "Database Path",
       "help": "Path to LCM SQLite database (default: ~/.openclaw/lcm.db)"
-    },
-    "databasePath": {
-      "label": "Database Path",
-      "help": "Path to LCM SQLite database (preferred key; alias of dbPath)"
     },
     "ignoreSessionPatterns": {
       "label": "Ignored Sessions",
@@ -75,14 +55,6 @@
     "skipStatelessSessions": {
       "label": "Skip Stateless Sessions",
       "help": "When enabled, matching stateless session keys skip LCM persistence and grant writes"
-    },
-    "largeFileThresholdTokens": {
-      "label": "Large File Threshold Tokens",
-      "help": "Token threshold that routes text attachments into large-file summarization"
-    },
-    "largeFileTokenThreshold": {
-      "label": "Large File Threshold Tokens",
-      "help": "Legacy alias of largeFileThresholdTokens"
     },
     "summaryModel": {
       "label": "Summary Model",
@@ -168,9 +140,21 @@
       "label": "Prune HEARTBEAT_OK",
       "help": "Retroactively delete HEARTBEAT_OK turn cycles from LCM storage"
     },
+    "leafSkipReductionThreshold": {
+      "label": "Leaf Skip Reduction Threshold",
+      "help": "Minimum estimated reduction (fraction of total assembled tokens) to justify leaf compaction. Set to 0 to disable. Default 0.05."
+    },
+    "leafBudgetHeadroomFactor": {
+      "label": "Leaf Budget Headroom Factor",
+      "help": "Skip leaf compaction when assembled tokens are below this fraction of contextThreshold × tokenBudget. Set to 0 to disable. Default 0.8."
+    },
     "fallbackProviders": {
       "label": "Fallback Providers",
       "help": "Explicit fallback provider/model pairs for compaction summarization (e.g., [{\"provider\": \"anthropic\", \"model\": \"claude-haiku-4-5\"}])"
+    },
+    "pinnedFiles": {
+      "label": "Pinned Files",
+      "help": "Workspace files always present in context (never compacted). Paths relative to agent workspace."
     }
   },
   "configSchema": {
@@ -248,10 +232,6 @@
         "type": "boolean"
       },
       "largeFileThresholdTokens": {
-        "type": "integer",
-        "minimum": 1000
-      },
-      "largeFileTokenThreshold": {
         "type": "integer",
         "minimum": 1000
       },
@@ -356,6 +336,23 @@
           "required": ["provider", "model"],
           "additionalProperties": false
         }
+      },
+      "leafSkipReductionThreshold": {
+        "description": "Minimum estimated reduction (fraction of total assembled tokens) to justify leaf compaction. Prevents cache-prefix invalidation when the gain is tiny. Set to 0 to disable. Default 0.05.",
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "leafBudgetHeadroomFactor": {
+        "description": "Skip leaf compaction when assembled tokens are below this fraction of contextThreshold × tokenBudget. Set to 0 to disable. Default 0.8.",
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pinnedFiles": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Workspace-relative file paths injected into every context assembly, outside the compaction DAG. These files are never summarized."
       }
     }
   }
