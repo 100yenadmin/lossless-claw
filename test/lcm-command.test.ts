@@ -254,46 +254,143 @@ describe("lcm command", () => {
     expect(result.text).toContain("fallback: Showing Global stats only.");
   });
 
-  it("reports doctor scan counts grouped by conversation", async () => {
+  it("scopes doctor output to the resolved current conversation when issues exist", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
 
-    const firstConversation = await fixture.conversationStore.createConversation({
-      sessionId: "doctor-one",
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-current",
+      sessionKey: "agent:main:telegram:direct:doctor-current",
     });
-    const secondConversation = await fixture.conversationStore.createConversation({
-      sessionId: "doctor-two",
+    const otherConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-other",
+      sessionKey: "agent:main:telegram:direct:doctor-other",
     });
 
     await fixture.summaryStore.insertSummary({
-      summaryId: "sum_old",
-      conversationId: firstConversation.conversationId,
+      summaryId: "sum_current_old",
+      conversationId: currentConversation.conversationId,
       kind: "leaf",
       depth: 0,
       content: `${"[LCM fallback summary; truncated for context management]"}\nlegacy fallback`,
       tokenCount: 10,
     });
     await fixture.summaryStore.insertSummary({
-      summaryId: "sum_new",
-      conversationId: secondConversation.conversationId,
+      summaryId: "sum_current_new",
+      conversationId: currentConversation.conversationId,
       kind: "leaf",
       depth: 0,
       content: `useful summary body\n${"[Truncated from 999 tokens]"}`,
       tokenCount: 11,
     });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_other_new",
+      conversationId: otherConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `other summary body\n${"[Truncated from 123 tokens]"}`,
+      tokenCount: 7,
+    });
 
-    const result = await fixture.command.handler(createCommandContext("doctor"));
+    const result = await fixture.command.handler(
+      createCommandContext("doctor", {
+        sessionKey: "agent:main:telegram:direct:doctor-current",
+      }),
+    );
+
     expect(result.text).toContain("🩺 Lossless Claw Doctor");
+    expect(result.text).toContain(`conversation id: ${currentConversation.conversationId}`);
+    expect(result.text).toContain("scope: this conversation only");
     expect(result.text).toContain("detected summaries: 2");
     expect(result.text).toContain("old-marker summaries: 1");
     expect(result.text).toContain("truncated-marker summaries: 1");
-    expect(result.text).toContain(
-      `#${firstConversation.conversationId} · 1 total · 1 old · 0 truncated · 0 fallback`,
+    expect(result.text).toContain("result: issues found");
+    expect(result.text).toContain("sum_current_new (new), sum_current_old (old)");
+    expect(result.text).not.toContain("sum_other_new");
+    expect(result.text).not.toContain(`conversation id: ${otherConversation.conversationId}`);
+  });
+
+  it("reports a clean scoped doctor result for the resolved current conversation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-clean",
+      sessionKey: "agent:main:telegram:direct:doctor-clean",
+    });
+    const otherConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-dirty",
+      sessionKey: "agent:main:telegram:direct:doctor-dirty",
+    });
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_clean",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "healthy summary",
+      tokenCount: 9,
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_dirty",
+      conversationId: otherConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `dirty summary\n${"[Truncated from 333 tokens]"}`,
+      tokenCount: 12,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor", {
+        sessionKey: "agent:main:telegram:direct:doctor-clean",
+      }),
     );
-    expect(result.text).toContain(
-      `#${secondConversation.conversationId} · 1 total · 0 old · 1 truncated · 0 fallback`,
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor");
+    expect(result.text).toContain(`conversation id: ${currentConversation.conversationId}`);
+    expect(result.text).toContain("scope: this conversation only");
+    expect(result.text).toContain("detected summaries: 0");
+    expect(result.text).toContain("result: clean");
+    expect(result.text).not.toContain("🧷 Affected summaries");
+    expect(result.text).not.toContain("sum_dirty");
+  });
+
+  it("reports doctor as unavailable when the current conversation cannot be resolved", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const otherConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-unresolved-other",
+      sessionKey: "agent:main:telegram:direct:doctor-unresolved-other",
+    });
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_unresolved_other",
+      conversationId: otherConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `other summary body\n${"[Truncated from 204 tokens]"}`,
+      tokenCount: 16,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor", {
+        sessionKey: "agent:main:telegram:direct:not-stored",
+        sessionId: "doctor-unresolved-missing",
+      }),
     );
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor");
+    expect(result.text).toContain("status: unavailable");
+    expect(result.text).toContain(
+      "No LCM conversation is stored yet for active session key `agent:main:telegram:direct:not-stored` or active session id `doctor-unresolved-missing`.",
+    );
+    expect(result.text).toContain("fallback: Doctor is conversation-scoped, so no global scan ran.");
+    expect(result.text).not.toContain("detected summaries:");
+    expect(result.text).not.toContain("sum_unresolved_other");
   });
 
   it("falls back to help text for unsupported subcommands", async () => {

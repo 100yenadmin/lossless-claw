@@ -195,15 +195,29 @@ function detectDoctorMarker(content: string): DoctorMarkerKind | null {
   return null;
 }
 
-function getDoctorSummaryStats(db: DatabaseSync): DoctorSummaryStats {
-  const rows = db
-    .prepare(
-      `SELECT conversation_id, summary_id, COALESCE(content, '') AS content
-       FROM summaries
-       WHERE INSTR(COALESCE(content, ''), ?) > 0
-          OR INSTR(COALESCE(content, ''), ?) > 0`,
-    )
-    .all(FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX) as Array<{
+function getDoctorSummaryStats(
+  db: DatabaseSync,
+  conversationId?: number,
+): DoctorSummaryStats {
+  const statement = conversationId === undefined
+    ? db.prepare(
+        `SELECT conversation_id, summary_id, COALESCE(content, '') AS content
+         FROM summaries
+         WHERE INSTR(COALESCE(content, ''), ?) > 0
+            OR INSTR(COALESCE(content, ''), ?) > 0`,
+      )
+    : db.prepare(
+        `SELECT conversation_id, summary_id, COALESCE(content, '') AS content
+         FROM summaries
+         WHERE conversation_id = ?
+           AND (
+             INSTR(COALESCE(content, ''), ?) > 0
+             OR INSTR(COALESCE(content, ''), ?) > 0
+           )`,
+      );
+  const rows = (conversationId === undefined
+    ? statement.all(FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)
+    : statement.all(conversationId, FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)) as Array<{
     conversation_id: number;
     summary_id: string;
     content: string;
@@ -583,46 +597,60 @@ async function buildStatusText(params: {
   return lines.join("\n");
 }
 
-function buildDoctorText(db: DatabaseSync): string {
-  const stats = getDoctorSummaryStats(db);
-  if (stats.total === 0) {
+async function buildDoctorText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+}): Promise<string> {
+  const current = await resolveCurrentConversation(params);
+
+  if (current.kind === "unavailable") {
     return [
+      ...buildHeaderLines(),
+      "",
       "🩺 Lossless Claw Doctor",
       "",
-      `No broken or truncated summaries detected. See ${formatCommand(`${VISIBLE_COMMAND} help`)} for command docs.`,
+      buildSection("📍 Current conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+        buildStatLine("fallback", "Doctor is conversation-scoped, so no global scan ran."),
+      ]),
     ].join("\n");
   }
 
+  const stats = getDoctorSummaryStats(params.db, current.stats.conversationId);
   const lines = [
     ...buildHeaderLines(),
     "",
     "🩺 Lossless Claw Doctor",
+    "",
+    buildSection("📍 Current conversation", [
+      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+      buildStatLine(
+        "session key",
+        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+      ),
+      buildStatLine("scope", "this conversation only"),
+    ]),
     "",
     buildSection("🧪 Scan", [
       buildStatLine("detected summaries", formatNumber(stats.total)),
       buildStatLine("old-marker summaries", formatNumber(stats.old)),
       buildStatLine("truncated-marker summaries", formatNumber(stats.truncated)),
       buildStatLine("fallback-marker summaries", formatNumber(stats.fallback)),
+      buildStatLine("result", stats.total === 0 ? "clean" : "issues found"),
     ]),
-    "",
-    "💬 Affected Conversations",
   ];
 
-  const conversations = [...stats.byConversation.entries()].sort((left, right) => {
-    if (right[1].total !== left[1].total) {
-      return right[1].total - left[1].total;
-    }
-    return left[0] - right[0];
-  });
-
-  for (const [conversationId, counts] of conversations.slice(0, 10)) {
+  if (stats.total > 0) {
+    const summaryList = stats.candidates
+      .slice()
+      .sort((left, right) => left.summaryId.localeCompare(right.summaryId))
+      .map((candidate) => `${candidate.summaryId} (${candidate.markerKind})`)
+      .join(", ");
     lines.push(
-      `  #${formatNumber(conversationId)} · ${formatNumber(counts.total)} total · ${formatNumber(counts.old)} old · ${formatNumber(counts.truncated)} truncated · ${formatNumber(counts.fallback)} fallback`,
+      "",
+      buildSection("🧷 Affected summaries", [summaryList]),
     );
-  }
-
-  if (conversations.length > 10) {
-    lines.push(`  +${formatNumber(conversations.length - 10)} more conversations`);
   }
 
   return lines.join("\n");
@@ -645,7 +673,7 @@ export function createLcmCommand(params: {
         case "status":
           return { text: await buildStatusText({ ctx, db: params.db, config: params.config }) };
         case "doctor":
-          return { text: buildDoctorText(params.db) };
+          return { text: await buildDoctorText({ ctx, db: params.db }) };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }
