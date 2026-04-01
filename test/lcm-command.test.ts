@@ -119,18 +119,18 @@ describe("lcm command", () => {
     const result = await fixture.command.handler(createCommandContext());
     expect(result.text).toContain("🦀 Lossless Claw");
     expect(result.text).toContain("Help: `/lossless help`");
-    expect(result.text).toContain("Hidden alias: `/lcm`");
+    expect(result.text).toContain("Alias: `/lcm`");
     expect(result.text).toContain("🧩 Plugin");
-    expect(result.text).toContain("enabled                  yes");
-    expect(result.text).toContain("selected                 yes (slot=lossless-claw)");
-    expect(result.text).toContain(`db path                  ${fixture.dbPath}`);
-    expect(result.text).toContain("🌐 GLOBAL");
-    expect(result.text).toContain("summaries                2 (1 leaf, 1 condensed)");
-    expect(result.text).toContain("stored summary tokens    75");
-    expect(result.text).toContain("summarized source tokens 22");
+    expect(result.text).toContain("enabled: yes");
+    expect(result.text).toContain("selected: yes (slot=lossless-claw)");
+    expect(result.text).toContain(`db path: ${fixture.dbPath}`);
+    expect(result.text).toContain("🌐 Global");
+    expect(result.text).toContain("summaries: 2 (1 leaf, 1 condensed)");
+    expect(result.text).toContain("stored summary tokens: 75");
+    expect(result.text).toContain("summarized source tokens: 22");
     expect(result.text).toContain("warning (1 issue; run `/lossless doctor`)");
-    expect(result.text).toContain("📍 CURRENT CONVERSATION");
-    expect(result.text).toContain("status                   unavailable");
+    expect(result.text).toContain("📍 Current conversation");
+    expect(result.text).toContain("status: unavailable");
     expect(result.text).toContain("OpenClaw did not expose an active session key or session id here");
   });
 
@@ -181,14 +181,16 @@ describe("lcm command", () => {
       }),
     );
 
-    expect(result.text).toContain("📍 CURRENT CONVERSATION");
-    expect(result.text).toContain("status                   resolved via session key");
-    expect(result.text).toContain(`conversation id          ${conversation.conversationId}`);
-    expect(result.text).toContain("messages                 2");
-    expect(result.text).toContain("summaries                1 (1 leaf, 0 condensed)");
-    expect(result.text).toContain("stored summary tokens    21");
-    expect(result.text).toContain("summarized source tokens 21");
-    expect(result.text).toContain("doctor                   1 issue(s) in this conversation");
+    expect(result.text).toContain("📍 Current conversation");
+    expect(result.text).toContain("status: resolved via session key");
+    expect(result.text).toContain(`conversation id: ${conversation.conversationId}`);
+    expect(result.text).toContain("session key: agent:main:telegram:direct:4242");
+    expect(result.text).not.toContain("session id:");
+    expect(result.text).toContain("messages: 2");
+    expect(result.text).toContain("summaries: 1 (1 leaf, 0 condensed)");
+    expect(result.text).toContain("stored summary tokens: 21");
+    expect(result.text).toContain("summarized source tokens: 21");
+    expect(result.text).toContain("doctor: 1 issue(s) in this conversation");
   });
 
   it("falls back to the active session id when the current session key is not stored yet", async () => {
@@ -217,14 +219,14 @@ describe("lcm command", () => {
       }),
     );
 
-    expect(result.text).toContain("📍 CURRENT CONVERSATION");
+    expect(result.text).toContain("📍 Current conversation");
     expect(result.text).toContain(
-      "status                   resolved from active session key via session id fallback",
+      "status: resolved from active session key via session id fallback",
     );
-    expect(result.text).toContain(`conversation id          ${conversation.conversationId}`);
-    expect(result.text).toContain("session id               fallback-session-id");
-    expect(result.text).toContain("session key              missing");
-    expect(result.text).toContain("messages                 1");
+    expect(result.text).toContain(`conversation id: ${conversation.conversationId}`);
+    expect(result.text).not.toContain("session id:");
+    expect(result.text).toContain("session key: missing");
+    expect(result.text).toContain("messages: 1");
   });
 
   it("refuses session id fallback when it resolves to a different stored session key", async () => {
@@ -245,11 +247,11 @@ describe("lcm command", () => {
       }),
     );
 
-    expect(result.text).toContain("📍 CURRENT CONVERSATION");
-    expect(result.text).toContain("status                   unavailable");
+    expect(result.text).toContain("📍 Current conversation");
+    expect(result.text).toContain("status: unavailable");
     expect(result.text).toContain("Active session key `agent:main:telegram:direct:active` is not stored in LCM yet.");
-    expect(result.text).toContain("but it is bound to `agent:main:telegram:direct:stored`, so GLOBAL stats are safer.");
-    expect(result.text).toContain("fallback                 Showing GLOBAL stats only.");
+    expect(result.text).toContain("but it is bound to `agent:main:telegram:direct:stored`, so Global stats are safer.");
+    expect(result.text).toContain("fallback: Showing Global stats only.");
   });
 
   it("reports doctor scan counts grouped by conversation", async () => {
@@ -283,9 +285,9 @@ describe("lcm command", () => {
 
     const result = await fixture.command.handler(createCommandContext("doctor"));
     expect(result.text).toContain("🩺 Lossless Claw Doctor");
-    expect(result.text).toContain("detected summaries       2");
-    expect(result.text).toContain("old-marker summaries     1");
-    expect(result.text).toContain("truncated-marker summaries 1");
+    expect(result.text).toContain("detected summaries: 2");
+    expect(result.text).toContain("old-marker summaries: 1");
+    expect(result.text).toContain("truncated-marker summaries: 1");
     expect(result.text).toContain(
       `#${firstConversation.conversationId} · 1 total · 1 old · 0 truncated · 0 fallback`,
     );

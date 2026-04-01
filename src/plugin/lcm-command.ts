@@ -111,7 +111,7 @@ function formatCommand(command: string): string {
 function buildHeaderLines(): string[] {
   return [
     `🦀 Lossless Claw v${packageJson.version}`,
-    `Help: ${formatCommand(`${VISIBLE_COMMAND} help`)} · Hidden alias: ${formatCommand(HIDDEN_ALIAS)}`,
+    `Help: ${formatCommand(`${VISIBLE_COMMAND} help`)} · Alias: ${formatCommand(HIDDEN_ALIAS)}`,
   ];
 }
 
@@ -120,7 +120,7 @@ function buildSection(title: string, lines: string[]): string {
 }
 
 function buildStatLine(label: string, value: string): string {
-  return `${label.padEnd(24, " ")} ${value}`;
+  return `${label}: ${value}`;
 }
 
 function buildDoctorBadge(params: { total: number; command: string }): string {
@@ -412,7 +412,7 @@ async function resolveCurrentConversation(params: {
 
         return {
           kind: "unavailable",
-          reason: `Active session key ${formatCommand(sessionKey)} is not stored in LCM yet. Session id fallback found conversation #${formatNumber(bySessionId.conversationId)}, but it is bound to ${formatCommand(bySessionId.sessionKey)}, so GLOBAL stats are safer.`,
+          reason: `Active session key ${formatCommand(sessionKey)} is not stored in LCM yet. Session id fallback found conversation #${formatNumber(bySessionId.conversationId)}, but it is bound to ${formatCommand(bySessionId.sessionKey)}, so Global stats are safer.`,
         };
       }
     }
@@ -485,7 +485,7 @@ function buildHelpText(error?: string): string {
     "",
     buildSection("📘 Commands", [
       buildStatLine(formatCommand(VISIBLE_COMMAND), "Show compact status output."),
-      buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, GLOBAL, and current-conversation status."),
+      buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, Global, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
     ]),
     "",
@@ -524,7 +524,7 @@ async function buildStatusText(params: {
       buildStatLine("db size", dbSize),
     ]),
     "",
-    buildSection("🌐 GLOBAL", [
+    buildSection("🌐 Global", [
       buildStatLine("conversations", formatNumber(status.conversationCount)),
       buildStatLine(
         "summaries",
@@ -549,7 +549,7 @@ async function buildStatusText(params: {
         fallback: 0,
       };
     lines.push(
-      buildSection("📍 CURRENT CONVERSATION", [
+      buildSection("📍 Current conversation", [
         buildStatLine(
           "status",
           current.source === "session_key_via_session_id"
@@ -557,7 +557,6 @@ async function buildStatusText(params: {
             : `resolved via ${current.source.replaceAll("_", " ")}`,
         ),
         buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
-        buildStatLine("session id", truncateMiddle(current.stats.sessionId, 28)),
         buildStatLine(
           "session key",
           current.stats.sessionKey ? truncateMiddle(current.stats.sessionKey, 44) : "missing",
@@ -579,10 +578,10 @@ async function buildStatusText(params: {
     );
   } else {
     lines.push(
-      buildSection("📍 CURRENT CONVERSATION", [
+      buildSection("📍 Current conversation", [
         buildStatLine("status", "unavailable"),
         buildStatLine("reason", current.reason),
-        buildStatLine("fallback", "Showing GLOBAL stats only."),
+        buildStatLine("fallback", "Showing Global stats only."),
       ]),
     );
   }
