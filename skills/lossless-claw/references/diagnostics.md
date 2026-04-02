@@ -4,7 +4,7 @@ For the MVP, use the native command surface first.
 
 ## Fast path
 
-### `/lcm`
+### `/lossless` (`/lcm` alias)
 
 Use this when you need a quick health snapshot.
 
@@ -17,7 +17,7 @@ It should answer:
 - Are summaries present?
 - Are broken or truncated summaries present?
 
-### `/lcm doctor`
+### `/lossless doctor`
 
 Use this when summary corruption or truncation is suspected.
 
@@ -30,6 +30,21 @@ What it should help confirm:
 - which conversations are affected most
 
 ## Interpreting common states
+
+### `/lossless` tokens vs `/status` context
+
+These numbers are related, but they are not the same metric.
+
+- `/lossless` reports LCM-side conversation metrics such as the current frontier token count and compression ratio.
+- `/status` reports the last assembled runtime prompt snapshot for the active model.
+
+Why they can differ:
+
+- runtime assembly can trim or omit frontier material before the request is sent
+- model-specific token budgeting and packing happen after LCM frontier selection
+- `/status` reflects a last-run snapshot, while `/lossless` reads live LCM state from the DB
+
+Treat `/lossless` as the LCM health/shape view, and `/status` as the runtime request view.
 
 ### No summaries yet
 
@@ -53,7 +68,7 @@ Treat this as a signal to inspect summary health before trusting compacted conte
 
 For MVP guidance:
 
-- keep the user on `/lcm doctor`
+- keep the user on `/lossless doctor`
 - explain the count and affected conversations
 - avoid advertising separate repair-vs-doctor command families
 
@@ -61,4 +76,4 @@ For MVP guidance:
 
 - Do not guess exact historical details from compacted context alone.
 - When a user wants a fact pattern verified, use recall tools to recover evidence.
-- Prefer changing one configuration knob at a time and then re-checking `/lcm`.
+- Prefer changing one configuration knob at a time and then re-checking `/lossless`.

@@ -10,8 +10,8 @@ Use this skill when the task is about operating, tuning, or debugging the `lossl
 Start here:
 
 1. Confirm whether the user needs configuration help, diagnostics, or recall-tool guidance.
-2. If they need a quick health check, tell them to run `/lcm`.
-3. If they suspect summary corruption or truncation, use `/lcm doctor`.
+2. If they need a quick health check, tell them to run `/lossless` (`/lcm` is the shorter alias).
+3. If they suspect summary corruption or truncation, use `/lossless doctor`.
 4. Load the relevant reference file instead of improvising details from memory.
 
 Reference map:
@@ -24,7 +24,8 @@ Reference map:
 Working rules:
 
 - Prioritize explaining why a setting matters, not just what it does.
-- Prefer the native plugin command surface for MVP workflows.
+- Prefer the native plugin command surface for MVP workflows (`/lossless`, with `/lcm` as alias).
 - Do not assume the Go TUI is installed.
 - Do not recommend advanced rewrite/backfill/transplant/dissolve flows unless the user explicitly asks for non-MVP internals.
 - For exact evidence retrieval from compacted history, guide the user toward recall tools instead of guessing from summaries.
+- When users compare `/lossless` to `/status`, explain that they report different layers: `/lossless` shows LCM-side frontier/summary metrics, while `/status` shows the last assembled runtime prompt snapshot.

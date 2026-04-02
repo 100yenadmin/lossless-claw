@@ -6,7 +6,7 @@
 
 - Ensure the plugin is installed and enabled.
 - Ensure the context-engine slot points at `lossless-claw` when you want it to own compaction.
-- Run `/lcm` to confirm the plugin is active and see the live DB path.
+- Run `/lossless` (`/lcm` alias) to confirm the plugin is active and see the live DB path.
 
 ## Settings That Matter Most
 
@@ -108,5 +108,15 @@ Why it matters:
 1. Install and enable the plugin.
 2. Set the context-engine slot to `lossless-claw`.
 3. Start with conservative defaults.
-4. Run `/lcm` after startup to confirm path, size, and summary health.
+4. Run `/lossless` after startup to confirm path, size, and summary health.
 5. If recall feels weak, revisit `freshTailCount`, `leafChunkTokens`, and summarizer model quality before changing anything else.
+
+## Reading the status output
+
+`/lossless` is the right command for LCM-local metrics.
+
+Useful interpretation notes:
+
+- `LCM frontier tokens` (or similarly named frontier/context metric) is the token count of what LCM currently has active in its frontier.
+- `compression ratio` is shown as a rounded `1:N`, which is easier to read than a tiny percentage for heavily compacted conversations.
+- `/status` may still show a different context number because it reflects the runtime prompt that was actually assembled and sent on the last turn.
