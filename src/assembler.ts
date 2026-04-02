@@ -52,10 +52,11 @@ function estimateTokens(text: string): number {
 type SummaryPromptSignal = Pick<SummaryRecord, "kind" | "depth" | "descendantCount">;
 
 /**
- * Build LCM usage guidance for the runtime system prompt.
+ * Build dynamic prompt guidance for compacted session context.
  *
  * Guidance is emitted only when summaries are present in assembled context.
- * Depth-aware: minimal for shallow compaction, full guidance for deep trees.
+ * Static recall policy lives in the plugin prompt hook so this addition
+ * remains session-specific and reflects only the current compaction state.
  */
 function buildSystemPromptAddition(summarySignals: SummaryPromptSignal[]): string | undefined {
   if (summarySignals.length === 0) {
@@ -68,57 +69,38 @@ function buildSystemPromptAddition(summarySignals: SummaryPromptSignal[]): strin
 
   const sections: string[] = [];
 
-  // Core recall workflow — always present when summaries exist
+  // Dynamic compaction reminder — always present when summaries exist.
   sections.push(
-    "## LCM Recall",
+    "## Compacted Conversation Context",
     "",
-    "Summaries above are compressed context — maps to details, not the details themselves.",
+    "Summaries above are compressed context, not full detail.",
     "",
-    "**Recall priority:** Use LCM tools first for compacted conversation history. If LCM does not cover the needed data, prefer any available memory/recall tool before falling back to raw text search.",
+    "Treat summaries as compressed recall cues rather than proof of exact wording or exact values.",
     "",
-    "**Conflict handling:** If newer evidence conflicts with an older summary or recollection, prefer the newer evidence. Do not trust a stale summary over fresher contradictory information.",
-    "",
-    "**Contradictions/uncertainty:** If facts seem contradictory or uncertain, verify with LCM tools before answering instead of trusting the summary at face value.",
-    "",
-    "**Tool escalation:**",
-    "1. `lcm_grep` — search by regex or full-text across messages and summaries",
-    "2. `lcm_describe` — inspect a specific summary (cheap, no sub-agent)",
-    "3. `lcm_expand_query` — deep recall: spawns bounded sub-agent, expands DAG, returns answer with cited summary IDs (~120s, don't ration it)",
-    "",
-    "**`lcm_expand_query` usage** — two patterns (always requires `prompt`):",
-    "- With IDs: `lcm_expand_query(summaryIds: [\"sum_xxx\"], prompt: \"What config changes were discussed?\")`",
-    "- With search: `lcm_expand_query(query: \"database migration\", prompt: \"What strategy was decided?\")`",
-    "- Optional: `maxTokens` (default 2000), `conversationId`, `allConversations: true`",
-    "",
-    "**Summaries include \"Expand for details about:\" footers** listing compressed specifics. Use `lcm_expand_query` with that summary's ID to retrieve them.",
+    "If a summary includes an \"Expand for details about:\" footer, use it as a cue to expand before asserting specifics.",
   );
 
-  // Precision/evidence rules — always present but stronger when heavily compacted
+  // Precision/evidence rules — always present but stronger when heavily compacted.
   if (heavilyCompacted) {
     sections.push(
       "",
-      "**\u26a0 Deeply compacted context — expand before asserting specifics.**",
+      "**Deeply compacted context: expand before asserting specifics.**",
       "",
-      "Default recall flow for precision work:",
-      "1) `lcm_grep` to locate relevant summary/message IDs",
-      "2) `lcm_expand_query` with a focused prompt",
-      "3) Answer with citations to summary IDs used",
+      "Before answering with exact commands, SHAs, paths, timestamps, config values, or causal chains, expand for the missing detail.",
       "",
       "**Uncertainty checklist (run before answering):**",
-      "- Am I relying on an older summary even though newer evidence disagrees?",
-      "- Am I making exact factual claims from a condensed summary?",
+      "- Am I making an exact factual claim from a compressed or condensed summary?",
       "- Could compaction have omitted a crucial detail?",
-      "- Would this answer fail if the user asks for proof?",
+      "- Would I need an expansion step if the user asks for proof or the exact text?",
+      "- Should I state uncertainty instead of asserting specifics until I expand?",
       "",
-      "If yes to any \u2192 expand first.",
-      "",
-      "**Do not guess** exact commands, SHAs, file paths, timestamps, config values, or causal claims from condensed summaries. Expand first or state that you need to expand.",
+      "If yes to any item, expand first or explicitly say that you need to expand.",
     );
   } else {
     sections.push(
       "",
-      "**For precision/evidence questions** (exact commands, SHAs, paths, timestamps, config values, root-cause chains): expand before answering.",
-      "Do not guess from condensed summaries — expand first or state uncertainty.",
+      "For exact commands, SHAs, paths, timestamps, config values, or causal chains, expand for details before answering.",
+      "State uncertainty instead of guessing from compressed summaries.",
     );
   }
 

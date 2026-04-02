@@ -112,6 +112,25 @@ type CompletionBridgeErrorInfo = {
   message?: string;
 };
 
+const LOSSLESS_RECALL_POLICY_PROMPT = [
+  "## Lossless Recall Policy",
+  "",
+  "The lossless-claw plugin is active.",
+  "",
+  "For compacted conversation history, these instructions supersede generic memory-recall guidance. Prefer lossless-claw recall tools first when answering questions about prior conversation content, decisions made in the conversation, or details that may have been compacted.",
+  "",
+  "Recall order for compacted conversation history:",
+  "1. `lcm_grep`",
+  "2. `lcm_describe`",
+  "3. `lcm_expand_query`",
+  "",
+  "Use `memory_search` / `memory_get` only if lossless-claw does not return enough evidence, or when you need durable memory outside compacted conversation history such as `MEMORY.md` or `memory/*.md`.",
+  "",
+  "These precedence rules apply only to compacted conversation history. Lossless-claw does not supersede memory tools globally.",
+  "",
+  "If a summary conflicts with newer evidence, prefer the newer evidence. Do not guess exact commands, SHAs, paths, timestamps, config values, or causal claims from compacted summaries when expansion is needed.",
+].join("\n");
+
 /** Capture plugin env values once during initialization. */
 function snapshotPluginEnv(env: NodeJS.ProcessEnv = process.env): PluginEnvSnapshot {
   return {
@@ -1530,6 +1549,10 @@ const lcmPlugin = {
         sessionKey: ctx.sessionKey,
       });
     });
+    api.on("before_prompt_build", () => ({
+      prependContext: LOSSLESS_RECALL_POLICY_PROMPT,
+      prependSystemContext: LOSSLESS_RECALL_POLICY_PROMPT,
+    }));
     api.registerContextEngine("lossless-claw", () => lcm);
     api.registerContextEngine("default", () => lcm);
     api.registerTool((ctx) =>
