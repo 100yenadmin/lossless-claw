@@ -32,6 +32,8 @@ type LcmConversationStatusStats = {
   summaryCount: number;
   storedSummaryTokens: number;
   summarizedSourceTokens: number;
+  contextTokenCount: number;
+  compressedTokenCount: number;
   leafSummaryCount: number;
   condensedSummaryCount: number;
 };
@@ -103,12 +105,13 @@ function buildStatLine(label: string, value: string): string {
   return `${label}: ${value}`;
 }
 
-function buildDoctorBadge(params: { total: number; command: string }): string {
-  if (params.total === 0) {
-    return "clean";
+function formatCompressionRatio(contextTokens: number, compressedTokens: number): string {
+  if (!Number.isFinite(compressedTokens) || compressedTokens <= 0) {
+    return "n/a";
   }
-  const issueLabel = params.total === 1 ? "issue" : "issues";
-  return `warning (${formatNumber(params.total)} ${issueLabel}; run ${formatCommand(params.command)})`;
+  const ratio = (contextTokens / compressedTokens) * 100;
+  const precision = ratio >= 10 ? 1 : 2;
+  return `${ratio.toFixed(precision)}% (${formatNumber(contextTokens)} / ${formatNumber(compressedTokens)})`;
 }
 
 function truncateMiddle(value: string, maxChars: number): string {
@@ -211,6 +214,29 @@ function getConversationStatusStats(
          COALESCE((SELECT COUNT(*) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS summary_count,
          COALESCE((SELECT SUM(token_count) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS stored_summary_tokens,
          COALESCE((SELECT SUM(CASE WHEN kind = 'leaf' THEN source_message_token_count ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS summarized_source_tokens,
+         COALESCE((
+           SELECT SUM(token_count)
+           FROM (
+             SELECT m.token_count AS token_count
+             FROM context_items ci
+             JOIN messages m ON m.message_id = ci.message_id
+             WHERE ci.conversation_id = c.conversation_id
+               AND ci.item_type = 'message'
+             UNION ALL
+             SELECT s.token_count AS token_count
+             FROM context_items ci
+             JOIN summaries s ON s.summary_id = ci.summary_id
+             WHERE ci.conversation_id = c.conversation_id
+               AND ci.item_type = 'summary'
+           ) context_token_rows
+         ), 0) AS context_token_count,
+         COALESCE((
+           SELECT SUM(COALESCE(s.source_message_token_count, 0) + COALESCE(s.descendant_token_count, 0))
+           FROM context_items ci
+           JOIN summaries s ON s.summary_id = ci.summary_id
+           WHERE ci.conversation_id = c.conversation_id
+             AND ci.item_type = 'summary'
+         ), 0) AS compressed_token_count,
          COALESCE((SELECT SUM(CASE WHEN kind = 'leaf' THEN 1 ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS leaf_summary_count,
          COALESCE((SELECT SUM(CASE WHEN kind = 'condensed' THEN 1 ELSE 0 END) FROM summaries WHERE conversation_id = c.conversation_id), 0) AS condensed_summary_count
        FROM conversations c
@@ -225,6 +251,8 @@ function getConversationStatusStats(
         summary_count: number;
         stored_summary_tokens: number;
         summarized_source_tokens: number;
+        context_token_count: number;
+        compressed_token_count: number;
         leaf_summary_count: number;
         condensed_summary_count: number;
       }
@@ -242,6 +270,8 @@ function getConversationStatusStats(
     summaryCount: row.summary_count,
     storedSummaryTokens: row.stored_summary_tokens,
     summarizedSourceTokens: row.summarized_source_tokens,
+    contextTokenCount: row.context_token_count,
+    compressedTokenCount: row.compressed_token_count,
     leafSummaryCount: row.leaf_summary_count,
     condensedSummaryCount: row.condensed_summary_count,
   };
@@ -435,10 +465,6 @@ async function buildStatusText(params: {
       ),
       buildStatLine("stored summary tokens", formatNumber(status.storedSummaryTokens)),
       buildStatLine("summarized source tokens", formatNumber(status.summarizedSourceTokens)),
-      buildStatLine(
-        "doctor",
-        buildDoctorBadge({ total: doctor.total, command: `${VISIBLE_COMMAND} doctor` }),
-      ),
     ]),
     "",
   ];
@@ -465,6 +491,11 @@ async function buildStatusText(params: {
         ),
         buildStatLine("stored summary tokens", formatNumber(current.stats.storedSummaryTokens)),
         buildStatLine("summarized source tokens", formatNumber(current.stats.summarizedSourceTokens)),
+        buildStatLine("tokens in context", formatNumber(current.stats.contextTokenCount)),
+        buildStatLine(
+          "compression ratio",
+          formatCompressionRatio(current.stats.contextTokenCount, current.stats.compressedTokenCount),
+        ),
         buildStatLine(
           "doctor",
           conversationDoctor.total > 0

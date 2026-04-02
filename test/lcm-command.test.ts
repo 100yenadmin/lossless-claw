@@ -135,7 +135,8 @@ describe("lcm command", () => {
     expect(result.text).toContain("summaries: 2 (1 leaf, 1 condensed)");
     expect(result.text).toContain("stored summary tokens: 75");
     expect(result.text).toContain("summarized source tokens: 22");
-    expect(result.text).toContain("warning (1 issue; run `/lossless doctor`)");
+    expect(result.text).not.toContain("warning (1 issue; run `/lossless doctor`)");
+    expect(result.text).not.toContain("doctor: warning");
     expect(result.text).toContain("**📍 Current conversation**");
     expect(result.text).toContain("status: unavailable");
     expect(result.text).toContain("OpenClaw did not expose an active session key or session id here");
@@ -174,13 +175,30 @@ describe("lcm command", () => {
       kind: "leaf",
       depth: 0,
       content: `current summary body\n${"[Truncated from 512 tokens]"}`,
-      tokenCount: 21,
+      tokenCount: 7,
       sourceMessageTokenCount: 21,
     });
     await fixture.summaryStore.linkSummaryToMessages("current_leaf", [
       firstMessage.messageId,
       secondMessage.messageId,
     ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "current_parent",
+      conversationId: conversation.conversationId,
+      kind: "condensed",
+      depth: 1,
+      content: "current parent summary",
+      tokenCount: 5,
+      descendantTokenCount: 7,
+      sourceMessageTokenCount: 21,
+    });
+    await fixture.summaryStore.linkSummaryToParents("current_parent", ["current_leaf"]);
+    await fixture.summaryStore.replaceContextRangeWithSummary({
+      conversationId: conversation.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 1,
+      summaryId: "current_parent",
+    });
 
     const result = await fixture.command.handler(
       createCommandContext(undefined, {
@@ -194,9 +212,11 @@ describe("lcm command", () => {
     expect(result.text).toContain("session key: `agent:main:telegram:direct:4242`");
     expect(result.text).not.toContain("session id:");
     expect(result.text).toContain("messages: 2");
-    expect(result.text).toContain("summaries: 1 (1 leaf, 0 condensed)");
-    expect(result.text).toContain("stored summary tokens: 21");
+    expect(result.text).toContain("summaries: 2 (1 leaf, 1 condensed)");
+    expect(result.text).toContain("stored summary tokens: 12");
     expect(result.text).toContain("summarized source tokens: 21");
+    expect(result.text).toContain("tokens in context: 5");
+    expect(result.text).toContain("compression ratio: 17.9% (5 / 28)");
     expect(result.text).toContain("doctor: 1 issue(s) in this conversation");
   });
 
@@ -234,6 +254,8 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("session id:");
     expect(result.text).toContain("session key: missing");
     expect(result.text).toContain("messages: 1");
+    expect(result.text).toContain("tokens in context: 0");
+    expect(result.text).toContain("compression ratio: n/a");
   });
 
   it("refuses session id fallback when it resolves to a different stored session key", async () => {
