@@ -857,8 +857,9 @@ function resolveBootstrapMaxTokens(config: Pick<LcmConfig, "bootstrapMaxTokens" 
 /**
  * Keep only the newest bootstrap messages that fit within the token budget.
  *
- * The newest message is always preserved so a fork never starts empty when the
- * parent transcript has any recoverable content at all.
+ * When only one message exists and it exceeds the budget, returns an empty array
+ * rather than silently bypassing the cap. The caller should handle this case
+ * (e.g. log "no bootstrap messages fit within bootstrapMaxTokens").
  */
 function trimBootstrapMessagesToBudget(messages: AgentMessage[], maxTokens: number): AgentMessage[] {
   if (messages.length === 0) {
