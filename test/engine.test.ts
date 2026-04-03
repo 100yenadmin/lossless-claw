@@ -2510,12 +2510,17 @@ describe("LcmContextEngine.assemble canonical path", () => {
     expect(promptAddition).toContain("## Compacted Conversation Context");
     expect(promptAddition).toContain("Deeply compacted context");
     expect(promptAddition).toContain("expand before asserting specifics");
+    expect(promptAddition).toContain("Default recall flow for precision work:");
+    expect(promptAddition).toContain("1) `lcm_grep` to locate relevant summary/message IDs");
+    expect(promptAddition).toContain("2) `lcm_expand_query` with a focused prompt");
+    expect(promptAddition).toContain("3) Answer with citations to summary IDs used");
     expect(promptAddition).toContain("Uncertainty checklist");
     expect(promptAddition).toContain("Am I making an exact factual claim from a compressed or condensed summary?");
     expect(promptAddition).toContain("Could compaction have omitted a crucial detail?");
     expect(promptAddition).toContain("Would I need an expansion step if the user asks for proof or the exact text?");
     expect(promptAddition).toContain("Should I state uncertainty instead of asserting specifics until I expand?");
     expect(promptAddition).toContain("expand first or explicitly say that you need to expand");
+    expect(promptAddition).toContain("Do not guess exact commands, SHAs, file paths, timestamps, config values, or causal claims from condensed summaries.");
     expect(promptAddition).not.toContain("## Lossless Recall Policy");
     expect(promptAddition).not.toContain("The lossless-claw plugin is active");
     expect(promptAddition).not.toContain("Recall order for compacted conversation history");

@@ -120,15 +120,25 @@ describe("lcm plugin prompt hook", () => {
     expect(result.prependSystemContext).toContain(
       "these instructions supersede generic memory-recall guidance",
     );
-    expect(result.prependSystemContext).toContain("Recall order for compacted conversation history:");
-    expect(result.prependSystemContext).toContain("1. `lcm_grep`");
-    expect(result.prependSystemContext).toContain("2. `lcm_describe`");
-    expect(result.prependSystemContext).toContain("3. `lcm_expand_query`");
     expect(result.prependSystemContext).toContain(
-      "Use `memory_search` / `memory_get` only if lossless-claw does not return enough evidence",
+      "If facts seem contradictory or uncertain, verify with lossless-claw recall tools before answering",
+    );
+    expect(result.prependSystemContext).toContain("Recall order for compacted conversation history:");
+    expect(result.prependSystemContext).toContain("1. `lcm_grep` — search by regex or full-text");
+    expect(result.prependSystemContext).toContain("2. `lcm_describe` — inspect a specific summary");
+    expect(result.prependSystemContext).toContain(
+      "3. `lcm_expand_query` — deep recall: spawns bounded sub-agent",
+    );
+    expect(result.prependSystemContext).toContain(
+      "`lcm_expand_query` usage",
+    );
+    expect(result.prependSystemContext).toContain(
+      "lcm_expand_query(summaryIds: [\"sum_xxx\"], prompt: \"What config changes were discussed?\")",
     );
     expect(result.prependSystemContext).toContain(
       "Lossless-claw does not supersede memory tools globally",
     );
+    expect(result.prependSystemContext).not.toContain("memory_search");
+    expect(result.prependSystemContext).not.toContain("memory_get");
   });
 });

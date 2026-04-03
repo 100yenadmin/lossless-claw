@@ -88,6 +88,11 @@ function buildSystemPromptAddition(summarySignals: SummaryPromptSignal[]): strin
       "",
       "Before answering with exact commands, SHAs, paths, timestamps, config values, or causal chains, expand for the missing detail.",
       "",
+      "Default recall flow for precision work:",
+      "1) `lcm_grep` to locate relevant summary/message IDs",
+      "2) `lcm_expand_query` with a focused prompt",
+      "3) Answer with citations to summary IDs used",
+      "",
       "**Uncertainty checklist (run before answering):**",
       "- Am I making an exact factual claim from a compressed or condensed summary?",
       "- Could compaction have omitted a crucial detail?",
@@ -95,6 +100,8 @@ function buildSystemPromptAddition(summarySignals: SummaryPromptSignal[]): strin
       "- Should I state uncertainty instead of asserting specifics until I expand?",
       "",
       "If yes to any item, expand first or explicitly say that you need to expand.",
+      "",
+      "Do not guess exact commands, SHAs, file paths, timestamps, config values, or causal claims from condensed summaries. Expand first or explicitly say that you need to expand.",
     );
   } else {
     sections.push(
