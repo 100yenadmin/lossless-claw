@@ -68,6 +68,21 @@ function toNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+/** Safely parse a finite integer from an environment string, or return undefined.
+ *  Unlike raw parseInt(), this returns undefined for NaN so ?? fallback works. */
+function parseFiniteInt(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Safely parse a finite float from an environment string, or return undefined. */
+function parseFiniteNumber(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /** Safely coerce an unknown value to a boolean, or return undefined. */
 function toBool(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
@@ -115,10 +130,10 @@ export function resolveLcmConfig(
 ): LcmConfig {
   const pc = pluginConfig ?? {};
   const resolvedLeafChunkTokens =
-    (env.LCM_LEAF_CHUNK_TOKENS !== undefined ? parseInt(env.LCM_LEAF_CHUNK_TOKENS, 10) : undefined)
+    parseFiniteInt(env.LCM_LEAF_CHUNK_TOKENS)
       ?? toNumber(pc.leafChunkTokens) ?? 20000;
   const resolvedBootstrapMaxTokens =
-    (env.LCM_BOOTSTRAP_MAX_TOKENS !== undefined ? parseInt(env.LCM_BOOTSTRAP_MAX_TOKENS, 10) : undefined)
+    parseFiniteInt(env.LCM_BOOTSTRAP_MAX_TOKENS)
       ?? toNumber(pc.bootstrapMaxTokens)
       ?? Math.max(6000, Math.floor(resolvedLeafChunkTokens * 0.3));
   const envDelegationTimeoutMs =
@@ -155,41 +170,39 @@ export function resolveLcmConfig(
         ? env.LCM_SKIP_STATELESS_SESSIONS === "true"
         : toBool(pc.skipStatelessSessions) ?? true,
     contextThreshold:
-      (env.LCM_CONTEXT_THRESHOLD !== undefined ? parseFloat(env.LCM_CONTEXT_THRESHOLD) : undefined)
+      parseFiniteNumber(env.LCM_CONTEXT_THRESHOLD)
         ?? toNumber(pc.contextThreshold) ?? 0.75,
     freshTailCount:
-      (env.LCM_FRESH_TAIL_COUNT !== undefined ? parseInt(env.LCM_FRESH_TAIL_COUNT, 10) : undefined)
+      parseFiniteInt(env.LCM_FRESH_TAIL_COUNT)
         ?? toNumber(pc.freshTailCount) ?? 64,
     newSessionRetainDepth:
-      (env.LCM_NEW_SESSION_RETAIN_DEPTH !== undefined
-        ? parseInt(env.LCM_NEW_SESSION_RETAIN_DEPTH, 10)
-        : undefined)
+      parseFiniteInt(env.LCM_NEW_SESSION_RETAIN_DEPTH)
         ?? toNumber(pc.newSessionRetainDepth) ?? 2,
     leafMinFanout:
-      (env.LCM_LEAF_MIN_FANOUT !== undefined ? parseInt(env.LCM_LEAF_MIN_FANOUT, 10) : undefined)
+      parseFiniteInt(env.LCM_LEAF_MIN_FANOUT)
         ?? toNumber(pc.leafMinFanout) ?? 8,
     condensedMinFanout:
-      (env.LCM_CONDENSED_MIN_FANOUT !== undefined ? parseInt(env.LCM_CONDENSED_MIN_FANOUT, 10) : undefined)
+      parseFiniteInt(env.LCM_CONDENSED_MIN_FANOUT)
         ?? toNumber(pc.condensedMinFanout) ?? 4,
     condensedMinFanoutHard:
-      (env.LCM_CONDENSED_MIN_FANOUT_HARD !== undefined ? parseInt(env.LCM_CONDENSED_MIN_FANOUT_HARD, 10) : undefined)
+      parseFiniteInt(env.LCM_CONDENSED_MIN_FANOUT_HARD)
         ?? toNumber(pc.condensedMinFanoutHard) ?? 2,
     incrementalMaxDepth:
-      (env.LCM_INCREMENTAL_MAX_DEPTH !== undefined ? parseInt(env.LCM_INCREMENTAL_MAX_DEPTH, 10) : undefined)
+      parseFiniteInt(env.LCM_INCREMENTAL_MAX_DEPTH)
         ?? toNumber(pc.incrementalMaxDepth) ?? 1,
     leafChunkTokens: resolvedLeafChunkTokens,
     bootstrapMaxTokens: resolvedBootstrapMaxTokens,
     leafTargetTokens:
-      (env.LCM_LEAF_TARGET_TOKENS !== undefined ? parseInt(env.LCM_LEAF_TARGET_TOKENS, 10) : undefined)
+      parseFiniteInt(env.LCM_LEAF_TARGET_TOKENS)
         ?? toNumber(pc.leafTargetTokens) ?? 2400,
     condensedTargetTokens:
-      (env.LCM_CONDENSED_TARGET_TOKENS !== undefined ? parseInt(env.LCM_CONDENSED_TARGET_TOKENS, 10) : undefined)
+      parseFiniteInt(env.LCM_CONDENSED_TARGET_TOKENS)
         ?? toNumber(pc.condensedTargetTokens) ?? 2000,
     maxExpandTokens:
-      (env.LCM_MAX_EXPAND_TOKENS !== undefined ? parseInt(env.LCM_MAX_EXPAND_TOKENS, 10) : undefined)
+      parseFiniteInt(env.LCM_MAX_EXPAND_TOKENS)
         ?? toNumber(pc.maxExpandTokens) ?? 4000,
     largeFileTokenThreshold:
-      (env.LCM_LARGE_FILE_TOKEN_THRESHOLD !== undefined ? parseInt(env.LCM_LARGE_FILE_TOKEN_THRESHOLD, 10) : undefined)
+      parseFiniteInt(env.LCM_LARGE_FILE_TOKEN_THRESHOLD)
         ?? toNumber(pc.largeFileThresholdTokens)
         ?? toNumber(pc.largeFileTokenThreshold)
         ?? 25000,
@@ -212,18 +225,18 @@ export function resolveLcmConfig(
         ? env.LCM_PRUNE_HEARTBEAT_OK === "true"
         : toBool(pc.pruneHeartbeatOk) ?? false,
     maxAssemblyTokenBudget:
-      (env.LCM_MAX_ASSEMBLY_TOKEN_BUDGET !== undefined ? parseInt(env.LCM_MAX_ASSEMBLY_TOKEN_BUDGET, 10) : undefined)
+      parseFiniteInt(env.LCM_MAX_ASSEMBLY_TOKEN_BUDGET)
         ?? toNumber(pc.maxAssemblyTokenBudget) ?? undefined,
     summaryMaxOverageFactor:
-      (env.LCM_SUMMARY_MAX_OVERAGE_FACTOR !== undefined ? parseFloat(env.LCM_SUMMARY_MAX_OVERAGE_FACTOR) : undefined)
+      parseFiniteNumber(env.LCM_SUMMARY_MAX_OVERAGE_FACTOR)
         ?? toNumber(pc.summaryMaxOverageFactor) ?? 3,
     customInstructions:
       env.LCM_CUSTOM_INSTRUCTIONS?.trim() ?? toStr(pc.customInstructions) ?? "",
     circuitBreakerThreshold:
-      (env.LCM_CIRCUIT_BREAKER_THRESHOLD !== undefined ? parseInt(env.LCM_CIRCUIT_BREAKER_THRESHOLD, 10) : undefined)
+      parseFiniteInt(env.LCM_CIRCUIT_BREAKER_THRESHOLD)
         ?? toNumber(pc.circuitBreakerThreshold) ?? 5,
     circuitBreakerCooldownMs:
-      (env.LCM_CIRCUIT_BREAKER_COOLDOWN_MS !== undefined ? parseInt(env.LCM_CIRCUIT_BREAKER_COOLDOWN_MS, 10) : undefined)
+      parseFiniteInt(env.LCM_CIRCUIT_BREAKER_COOLDOWN_MS)
         ?? toNumber(pc.circuitBreakerCooldownMs) ?? 1_800_000,
   };
 }

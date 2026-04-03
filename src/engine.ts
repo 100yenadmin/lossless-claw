@@ -883,6 +883,13 @@ function trimBootstrapMessagesToBudget(messages: AgentMessage[], maxTokens: numb
     totalTokens += tokenCount;
   }
 
+  // If a single oversized tail message exceeds the budget, return empty
+  // rather than silently bypassing the budget cap. An empty bootstrap is
+  // safer than an exploding one.
+  if (kept.length === 1 && totalTokens > safeMaxTokens) {
+    return [];
+  }
+
   kept.reverse();
   return kept;
 }
