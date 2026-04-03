@@ -3132,6 +3132,49 @@ describe("LcmContextEngine fidelity and token budget", () => {
     ]);
   });
 
+  it("afterTurn deduplicates replayed history before prepending auto-compaction summary", async () => {
+    const engine = createEngine();
+    const sessionId = "after-turn-summary-replay";
+
+    await engine.afterTurn({
+      sessionId,
+      sessionFile: createSessionFilePath("after-turn-summary-replay-seed"),
+      messages: [
+        makeMessage({ role: "user", content: "old question" }),
+        makeMessage({ role: "assistant", content: "old answer" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      sessionFile: createSessionFilePath("after-turn-summary-replay"),
+      messages: [
+        makeMessage({ role: "system", content: "system prompt" }),
+        makeMessage({ role: "user", content: "old question" }),
+        makeMessage({ role: "assistant", content: "old answer" }),
+        makeMessage({ role: "user", content: "new question" }),
+        makeMessage({ role: "assistant", content: "new answer" }),
+      ],
+      prePromptMessageCount: 1,
+      autoCompactionSummary: "[summary] compacted older history",
+      tokenBudget: 4096,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "old question",
+      "old answer",
+      "[summary] compacted older history",
+      "new question",
+      "new answer",
+    ]);
+  });
+
   it("afterTurn runs proactive threshold compaction when tokenBudget is provided", async () => {
     const engine = createEngine();
     const sessionId = "after-turn-proactive-compact";

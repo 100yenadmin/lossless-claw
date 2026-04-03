@@ -2091,11 +2091,6 @@ export class LcmContextEngine implements ContextEngine {
    * Remove messages from the batch that already exist in the DB for this session.
    * Conservative replay detection: only strip a prefix when the incoming
    * batch begins with the entire stored transcript for the session.
-   */
-  /**
-   * Remove messages from the batch that already exist in the DB for this session.
-   * Conservative replay detection: only strip a prefix when the incoming
-   * batch begins with the entire stored transcript for the session.
    *
    * Fixes two issues from #246:
    * 1. Replaced hasMessage() fast-path with aligned-tail check — the old
@@ -2330,7 +2325,7 @@ export class LcmContextEngine implements ContextEngine {
       await this.ingestBatch({
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
-        messages: dedupedBatch,
+        messages: ingestBatch,
         isHeartbeat: params.isHeartbeat === true,
       });
     } catch (err) {
