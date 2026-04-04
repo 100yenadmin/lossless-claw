@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { acquireTransactionLock } from "../transaction-mutex.js";
 import { formatTimestamp } from "../compaction.js";
 import type { LcmConfig } from "../db/config.js";
 import type { LcmSummarizeFn } from "../summarize.js";
@@ -139,26 +140,31 @@ export async function applyScopedDoctorRepair(params: {
   }
 
   if (repairedSummaryIds.length > 0) {
-    params.db.exec("BEGIN IMMEDIATE");
+    const release = await acquireTransactionLock(params.db);
     try {
-      for (const summaryId of repairedSummaryIds) {
-        const override = overrides.get(summaryId);
-        if (!override) {
-          continue;
+      params.db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const summaryId of repairedSummaryIds) {
+          const override = overrides.get(summaryId);
+          if (!override) {
+            continue;
+          }
+          params.db
+            .prepare(
+              `UPDATE summaries
+               SET content = ?, token_count = ?
+               WHERE summary_id = ?`,
+            )
+            .run(override.content, override.tokenCount, summaryId);
+          updateSummaryFts(params.db, summaryId, override.content);
         }
-        params.db
-          .prepare(
-            `UPDATE summaries
-             SET content = ?, token_count = ?
-             WHERE summary_id = ?`,
-          )
-          .run(override.content, override.tokenCount, summaryId);
-        updateSummaryFts(params.db, summaryId, override.content);
+        params.db.exec("COMMIT");
+      } catch (error) {
+        params.db.exec("ROLLBACK");
+        throw error;
       }
-      params.db.exec("COMMIT");
-    } catch (error) {
-      params.db.exec("ROLLBACK");
-      throw error;
+    } finally {
+      release();
     }
   }
 
