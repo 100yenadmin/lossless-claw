@@ -236,13 +236,13 @@ describe("transaction-mutex", () => {
         fileIds: [],
       });
 
-      // These must serialize — without mutex, running them concurrently
-      // would cause "cannot start a transaction within a transaction"
+      // These are launched concurrently; without the mutex, that could
+      // cause "cannot start a transaction within a transaction"
       // because replaceContextRangeWithSummary uses bare BEGIN.
       //
-      // Run them sequentially (first replaces ordinals 0-1, shifting
-      // context items, then second replaces from the resulting state)
-      // to avoid data-level conflicts. The mutex prevents the SQLite-level
+      // The mutex serializes the transactions, but acquisition order is
+      // nondeterministic, so either replacement may run first. This test is
+      // only verifying that concurrent calls avoid the SQLite-level
       // nested-transaction error.
       await Promise.all([
         summaryStore.replaceContextRangeWithSummary({
@@ -356,7 +356,7 @@ describe("transaction-mutex", () => {
       const results = await Promise.allSettled(
         convs.map((conv, i) =>
           store.withTransaction(async () => {
-            await delay(Math.random() * 30);
+            await delay((i % 5) * 5);
             await store.createMessage({
               conversationId: conv.conversationId,
               seq: 1,

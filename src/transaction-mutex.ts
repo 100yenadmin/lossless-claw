@@ -35,6 +35,11 @@ function getOrCreateMutex(db: DatabaseSync): MutexState {
 /**
  * Acquire exclusive async access to the database for a transaction.
  *
+ * This hotfix mutex is intentionally non-reentrant: reacquiring the same
+ * database lock before releasing it will wait forever. Current in-tree
+ * patched entry points do not re-enter on the same async path, but callers
+ * must avoid nesting transaction entry on the same DatabaseSync handle.
+ *
  * Usage:
  *   const release = await acquireTransactionLock(this.db);
  *   try {
@@ -53,7 +58,7 @@ function getOrCreateMutex(db: DatabaseSync): MutexState {
 export function acquireTransactionLock(db: DatabaseSync): Promise<() => void> {
   const mutex = getOrCreateMutex(db);
 
-  let releaseResolve: () => void;
+  let releaseResolve!: () => void;
   const releasePromise = new Promise<void>((resolve) => {
     releaseResolve = resolve;
   });
@@ -65,5 +70,5 @@ export function acquireTransactionLock(db: DatabaseSync): Promise<() => void> {
   mutex.tail = releasePromise;
 
   // Wait for the previous holder to release, then return our release fn
-  return waitOn.then(() => releaseResolve!);
+  return waitOn.then(() => releaseResolve);
 }
