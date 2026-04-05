@@ -4115,6 +4115,46 @@ describe("LcmContextEngine.compact token budget plumbing", () => {
     expect(prompt).not.toContain("Write in third person.");
   });
 
+  it("supports openai-codex large-file summarization without direct-credential retry", async () => {
+    const completeSpy = vi.fn(async ({ apiKey }: { apiKey?: string }) => ({
+      content: apiKey === "scoped-token"
+        ? []
+        : [{ type: "text", text: "codex large-file summary" }],
+      ...(apiKey === "scoped-token"
+        ? {
+            error: {
+              kind: "provider_auth",
+              statusCode: 401,
+              message: "Missing required scope: model.request",
+            },
+          }
+        : {}),
+    }));
+    const getApiKeySpy = vi.fn(async () => "scoped-token");
+    const engine = createEngineWithDeps(
+      {
+        largeFileSummaryProvider: "openai-codex",
+        largeFileSummaryModel: "gpt-5.4",
+      },
+      {
+        complete: completeSpy,
+        getApiKey: getApiKeySpy,
+        isRuntimeManagedAuthProvider: () => true,
+      },
+    );
+    const privateEngine = engine as unknown as {
+      resolveLargeFileTextSummarizer: () => Promise<((prompt: string) => Promise<string | null>) | undefined>;
+    };
+
+    const summarizeText = await privateEngine.resolveLargeFileTextSummarizer();
+    expect(summarizeText).toBeTypeOf("function");
+
+    const summary = await summarizeText!("Large file prompt");
+    expect(summary).toBeNull();
+    expect(getApiKeySpy).toHaveBeenCalledTimes(1);
+    expect(completeSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("forwards config customInstructions to large-file summarization", async () => {
     const completeSpy = vi.fn(async () => ({
       content: [{ type: "text", text: "summary output" }],
