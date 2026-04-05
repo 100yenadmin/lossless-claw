@@ -776,7 +776,7 @@ describe("createLcmSummarizeFromLegacyParams", () => {
       }
     });
 
-    it("skips direct api-key lookup and direct-credential retry for runtime-managed auth providers", async () => {
+    it("preserves first-pass credential resolution but skips direct-credential retry for runtime-managed auth providers", async () => {
       const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         const deps = makeDeps({
