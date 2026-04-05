@@ -476,6 +476,85 @@ describe("createLcmExpandQueryTool", () => {
     });
   });
 
+  it("passes split openai-codex expansion overrides through on the happy path", async () => {
+    const retrieval = makeRetrieval();
+    retrieval.describe.mockResolvedValue({
+      type: "summary",
+      summary: { conversationId: 42 },
+    });
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      if (request.method === "agent") {
+        return { runId: "run-openai-codex-split" };
+      }
+      if (request.method === "agent.wait") {
+        return { status: "ok" };
+      }
+      if (request.method === "sessions.get") {
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    answer: "Handled by split codex override.",
+                    citedIds: ["sum_a"],
+                    expandedSummaryCount: 1,
+                    totalSourceTokens: 222,
+                    truncated: false,
+                  }),
+                },
+              ],
+            },
+          ],
+        };
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true };
+      }
+      return {};
+    });
+
+    const deps = makeDeps();
+    const tool = createLcmExpandQueryTool({
+      deps: {
+        ...deps,
+        config: {
+          ...deps.config,
+          expansionProvider: "openai-codex",
+          expansionModel: "gpt-5.4",
+        },
+      },
+      lcm: makeEngine({ retrieval }),
+      sessionId: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+    });
+
+    const result = await tool.execute("call-openai-codex-split-happy", {
+      summaryIds: ["sum_a"],
+      prompt: "Answer this",
+      conversationId: 42,
+    });
+
+    expect(result.details).toMatchObject({
+      answer: "Handled by split codex override.",
+      citedIds: ["sum_a"],
+      expandedSummaryCount: 1,
+    });
+
+    const agentCall = callGatewayMock.mock.calls
+      .map(([opts]) => opts as { method?: string; params?: Record<string, unknown> })
+      .find((entry) => entry.method === "agent");
+
+    expect(agentCall?.params).toMatchObject({
+      provider: "openai-codex",
+      model: "gpt-5.4",
+    });
+  });
+
   it("retries without override when delegated spawn fails with auth scope error", async () => {
     const retrieval = makeRetrieval();
     retrieval.describe.mockResolvedValue({
