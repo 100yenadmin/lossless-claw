@@ -223,7 +223,7 @@ export function resolveLcmConfig(
     delegationTimeoutMs: envDelegationTimeoutMs ?? toNumber(pc.delegationTimeoutMs) ?? 120000,
     summaryTimeoutMs:
       parseFiniteInt(env.LCM_SUMMARY_TIMEOUT_MS)
-        ?? toNumber(pc.summaryTimeoutMs) ?? 120000,
+        ?? toNumber(pc.summaryTimeoutMs) ?? 60000,
     timezone: env.TZ ?? toStr(pc.timezone) ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     pruneHeartbeatOk:
       env.LCM_PRUNE_HEARTBEAT_OK !== undefined
