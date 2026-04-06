@@ -122,7 +122,7 @@ After condensation (depth 1):
    ~2000 tokens             depth=0          ├── fresh tail ──┤
 ```
 
-A conversation with 100K raw tokens might be represented as 5K of summaries + 20K of fresh messages — an 80% reduction.
+A conversation with 100K raw tokens might be represented as 5K of summaries + 20K of fresh messages — a 75% reduction. Research shows 20-86% token reduction depending on session profile, with 39% average for mixed tool-use sessions ([arXiv:2602.22402](https://arxiv.org/abs/2602.22402)).
 
 ### Why compaction invalidates the prompt cache
 
@@ -306,3 +306,14 @@ When compaction runs on the main agent session, it stalls all connected sessions
 1. What model is used for compaction? Switch to Haiku or a mini model.
 2. Is `summaryTimeoutMs` set? Default is 60s — lower it to 30s for faster release.
 3. Is the compaction model returning errors? The circuit breaker trips after `circuitBreakerThreshold` (default 5) consecutive auth failures, then cools down for `circuitBreakerCooldownMs` (default 30 min).
+
+---
+
+## References
+
+- [LCM: Lossless Context Management](https://papers.voltropy.com/LCM) — Ehrlich & Blackman, Voltropy (2026). The foundational paper describing the DAG-based compaction architecture. Benchmarks show Volt (LCM-augmented agent) scoring 74.8 vs Claude Code 70.3 on OOLONG, with the gap widening at longer contexts.
+- [Contextual Memory Virtualisation (arXiv:2602.22402)](https://arxiv.org/abs/2602.22402) — DAG-based state management with structurally lossless trimming. Reports mean 20% token reduction, up to 86% for tool-heavy sessions, 39% average for mixed tool-use. Demonstrates economic viability under prompt caching across 76 real-world coding sessions.
+- [The Missing Memory Hierarchy (arXiv:2603.09023)](https://arxiv.org/html/2603.09023v1) — Treats context management as OS-style demand paging. Reports 37.1% reduction in effective input tokens, 0.0254% fault rate, 45% cumulative compute savings over 88 turns.
+- [Anthropic Prompt Caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) — Prefix-based caching at 1/10 input price, 5-minute TTL refreshed on hit.
+- [OpenAI Prompt Caching](https://openai.com/index/api-prompt-caching/) — Automatic 50% discount on cached input tokens for GPT-4o family.
+- [JetBrains Context Management Research](https://blog.jetbrains.com/research/2025/12/efficient-context-management/) — Empirical comparison finding LLM summarization causes 13-15% trajectory elongation; observation masking is 52% cheaper on average.
