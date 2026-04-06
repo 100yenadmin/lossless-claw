@@ -2724,7 +2724,7 @@ export class LcmContextEngine implements ContextEngine {
         const useSweep =
           manualCompactionRequested || forceCompaction || params.compactionTarget === "threshold";
         if (useSweep) {
-          const sweepResult = await this.compaction.compactFullSweep({
+          const sweepResult = await this.compaction.compact({
             conversationId,
             tokenBudget,
             summarize,
