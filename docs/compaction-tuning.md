@@ -62,7 +62,7 @@ Add these settings to your plugin config in `openclaw.json` under `plugins.entri
 
 | Do use | Don't use |
 |--------|-----------|
-| Sonnet 4.6, Haiku 4.5, GPT-4o-mini, Gemini Flash, Mercury | Opus 4.6, o3, any "thinking" model |
+| GPT-4o-mini, Gemini 2.5 Flash, Haiku 4.5, Sonnet 4.6 | Opus 4.6, o3, any "thinking" model |
 
 **Why:** Compaction runs inline during your session. A slow model (Opus at 3-8s/call) stalls your conversation while it works. A fast model (Haiku at 0.3-0.8s/call) finishes before you notice. Compaction is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
 
@@ -222,12 +222,12 @@ Compaction calls the LLM to summarize message chunks. Each call:
 
 | Model | Latency (20K input) | Cost per call | Session impact |
 |-------|-------------------|---------------|----------------|
-| Haiku 4.5 | 0.3-0.8s | ~$0.02 | Invisible |
+| Haiku 4.5 | 0.3-0.8s | ~$0.03 | Invisible |
 | Sonnet 4.6 | 1-3s | ~$0.10 | Brief pause |
-| Gemini Flash | 0.5-1.5s | ~$0.03 | Invisible |
-| GPT-4o-mini | 0.5-1.5s | ~$0.02 | Invisible |
+| Gemini 2.5 Flash | 0.5-1.5s | ~$0.01 | Invisible |
+| GPT-4o-mini | 0.5-1.5s | ~$0.005 | Invisible |
 | **Opus 4.6** | **3-8s** | **~$0.13** | **Visible stall** |
-| **o3 / thinking** | **5-30s** | **$0.50-2.00** | **Session timeout** |
+| **o3 / thinking** | **5-30s** | **$0.50+** | **Session timeout** |
 
 A full sweep on a large context may run 5-15 compaction calls. With Opus, that's 15-120 seconds of stall. With a thinking model, it can exceed the 2-minute typing timeout, causing the agent to appear dead.
 
@@ -235,10 +235,10 @@ A full sweep on a large context may run 5-15 compaction calls. With Opus, that's
 
 **Always use non-thinking, low-latency models.** Summarization is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
 
-1. `claude-haiku-4-5` — Best cost/latency ratio for Anthropic users
-2. `claude-sonnet-4-6` — Slightly better quality, still fast
-3. `gpt-4o-mini` — Excellent for OpenAI/OpenRouter users
-4. `gemini-2.0-flash` — Good for Google/Vertex users
+1. `gpt-4o-mini` — Cheapest option (~$0.005/call), good quality, automatic prompt caching
+2. `gemini-2.5-flash` — Very cheap (~$0.01/call), fastest TTFT, 90% cache discount on Vertex
+3. `claude-haiku-4-5` — Best Anthropic option (~$0.03/call), 165 tokens/sec throughput
+4. `claude-sonnet-4-6` — Higher quality (~$0.10/call), still fast enough for most sessions
 
 **Never use for compaction:**
 - `claude-opus-4-6` — 5x slower, 5x more expensive, no quality benefit

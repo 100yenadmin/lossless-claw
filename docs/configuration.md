@@ -314,9 +314,10 @@ When assembled tokens exceed the headroom ceiling, **budget pressure** is detect
 
 | Model | Latency | Cost | Notes |
 |-------|---------|------|-------|
-| `claude-haiku-4-5` | 0.3-0.8s | ~$0.02/call | Best cost/latency ratio |
-| `claude-sonnet-4-6` | 1-3s | ~$0.10/call | Slightly better quality |
-| `gpt-4o-mini` | 0.5-1.5s | ~$0.02/call | Good for OpenRouter |
+| `gpt-4o-mini` | 0.5-1.5s | ~$0.005/call | Cheapest, automatic caching |
+| `gemini-2.5-flash` | 0.5-1.5s | ~$0.01/call | Fastest TTFT |
+| `claude-haiku-4-5` | 0.3-0.8s | ~$0.03/call | Best Anthropic option |
+| `claude-sonnet-4-6` | 1-3s | ~$0.10/call | Higher quality, still fast |
 
 **Never use** Opus, o3, or thinking models for compaction — they add 3-30s per call with no summary quality benefit, and can cause 2-minute typing timeouts.
 
