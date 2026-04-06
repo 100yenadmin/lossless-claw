@@ -2,13 +2,19 @@
 
 ## TLDR — Quick Setup
 
-Lossless Claw compresses your conversation history into summaries so long sessions don't blow the context window or your API bill. On a 200-turn Opus session, proper tuning can cut costs 40-60%.
+Lossless Claw compresses your conversation history into summaries so long sessions don't blow the context window or your API bill. On a 200-turn Opus session, proper tuning can cut input token costs by 40-60%.
+
+> **Example:** A 200-turn Opus coding session costs ~$12 in input tokens without compaction tuning. With the recommended Opus config below and Sonnet as the compaction model, effective cost drops to ~$5.50 (compaction overhead: ~$0.40). **Net savings: ~$6/session.**
 
 **Three things to configure:**
 
 1. **Compaction model** — Use a fast, cheap model. Never use your main model.
 2. **Skip thresholds** — Prevent unnecessary compaction that wastes your prompt cache.
 3. **Chunk size** — How much context to compress per pass.
+
+### Where to put the config
+
+Add these settings to your plugin config in `openclaw.json` under `plugins.entries.lossless-claw.config`, or set them as environment variables prefixed with `LCM_`:
 
 ### Copy-paste configs
 
@@ -58,7 +64,21 @@ Lossless Claw compresses your conversation history into summaries so long sessio
 |--------|-----------|
 | Sonnet 4.6, Haiku 4.5, GPT-4o-mini, Gemini Flash, Mercury | Opus 4.6, o3, any "thinking" model |
 
-**Why:** Compaction runs synchronously in the gateway. A slow model (Opus at 3-8s/call) stalls all connected sessions. A fast model (Haiku at 0.3-0.8s/call) is invisible. Compaction is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
+**Why:** Compaction runs inline during your session. A slow model (Opus at 3-8s/call) stalls your conversation while it works. A fast model (Haiku at 0.3-0.8s/call) finishes before you notice. Compaction is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
+
+### Verify it's working
+
+After applying the config and restarting, run a session with 10+ turns. Look for `[lcm] afterTurn: leaf compaction triggered` in your logs (stderr). If you see `skipped (budget-headroom: ...)`, the skip guards are active and waiting for budget pressure — this is normal and expected on large-context models.
+
+### Key terms
+
+| Term | Meaning |
+|------|---------|
+| **Leaf** | A summary created from raw messages (the first compression level) |
+| **Condensed** | A summary created from other summaries (higher compression levels) |
+| **Fresh tail** | The most recent N messages, always kept raw (never compressed) |
+| **Ordinal** | A message's position number in the context sequence |
+| **Budget ceiling** | The token threshold where compaction triggers |
 
 ---
 
@@ -81,65 +101,37 @@ flowchart LR
 ```
 
 1. **Ingest** — New messages are stored in the database and appended to the context item list.
-2. **Leaf trigger** — Checks if raw (unsummarized) messages outside the fresh tail exceed `leafChunkTokens`. If so, evaluates skip guards before compacting.
+2. **Leaf trigger** — Checks if raw (unsummarized) messages outside the fresh tail (the most recent protected messages) exceed `leafChunkTokens`. If so, evaluates skip guards before compacting.
 3. **Full threshold** — Checks if total assembled context exceeds `contextThreshold x tokenBudget`. If so, runs a multi-round full sweep.
 4. **Assembly** — When the model needs context, the assembler builds the prompt from summaries + fresh messages, respecting the token budget.
 
-### The summary DAG
+### The summary hierarchy
 
-Messages are compressed into a hierarchy of summaries:
+Messages are compressed into a layered hierarchy of summaries. Each layer compresses further:
 
 ```
-Raw messages (depth -1):
+Raw messages:
   [msg₁] [msg₂] ... [msg₁₀] [msg₁₁] ... [msg₂₀] [msg₂₁] ... [msg₅₀]
 
 After leaf compaction (depth 0):
   [leaf₁: msgs 1-10] [leaf₂: msgs 11-20] [msg₂₁] ... [msg₅₀]
-   ~600 tokens          ~600 tokens         ├── fresh tail ──┤
+   ~2400 tokens         ~2400 tokens        ├── fresh tail ──┤
 
 After condensation (depth 1):
   [condensed₁: leafs 1-3] [leaf₄] [leaf₅] [msg₄₁] ... [msg₅₀]
-   ~900 tokens              depth=0          ├── fresh tail ──┤
+   ~2000 tokens             depth=0          ├── fresh tail ──┤
 ```
 
-Each tier compresses further. A conversation with 100K raw tokens might be represented as 5K of summaries + 20K of fresh messages — an 80% reduction.
-
-### Cache-aware skip guards
-
-The leaf compaction trigger evaluates three checks in priority order:
-
-```mermaid
-flowchart TD
-    A["rawTokensOutsideTail >= leafChunkTokens?"] -->|No| Z["No compaction needed"]
-    A -->|Yes| B["Assembled tokens < headroom ceiling?"]
-    B -->|"Yes (has headroom)"| Y["Skip: budget headroom\nNo pressure, preserve cache"]
-    B -->|"No / disabled"| C["Budget pressure detected?"]
-    C -->|Yes| E["COMPACT\nBudget pressure overrides cache"]
-    C -->|"No (headroom disabled\nor no tokenBudget)"| D["Reduction < 5% of total context?"]
-    D -->|Yes| X["Skip: cache-aware\nReduction too small for cache cost"]
-    D -->|No| G["COMPACT\nReduction is worthwhile"]
-
-    style E fill:#d4edda
-    style G fill:#d4edda
-    style Y fill:#fff3cd
-    style X fill:#fff3cd
-    style Z fill:#f8f9fa
-```
-
-**Why this ordering matters:**
-
-1. Budget pressure always wins. If you're approaching the context limit, compaction fires regardless of cache impact.
-2. The cache-aware skip only applies when there's no urgency. It prevents tiny compactions (e.g., saving 600 tokens out of 500K) that would bust the prompt cache for negligible gain.
-3. Setting either threshold to `0` disables that check entirely.
+A conversation with 100K raw tokens might be represented as 5K of summaries + 20K of fresh messages — an 80% reduction.
 
 ### Why compaction invalidates the prompt cache
 
 When a leaf pass runs, it:
-1. Replaces raw messages (ordinals 0-9) with a single summary (ordinal 0)
-2. Resequences all remaining ordinals to stay contiguous (0, 1, 2, ...)
-3. The assembled prompt changes structure — the Anthropic/OpenAI cache prefix no longer matches
+1. Replaces raw messages (positions 0-9) with a single summary (position 0)
+2. Resequences all remaining positions to stay contiguous (0, 1, 2, ...)
+3. The assembled prompt changes structure — the API prompt cache prefix no longer matches
 
-**Cache miss cost:** On Opus 4.6, a 150K cached prefix costs $1.50/MTok. A cache miss on that prefix costs $15/MTok — a **10x penalty**. One unnecessary compaction can cost $2+ in a single cache miss.
+**Cache miss cost:** On Opus 4.6, a 150K cached prefix costs $1.50/MTok to read. A cache miss on that prefix costs $15/MTok — a **10x penalty**. One unnecessary compaction can cost $2+ in a single cache miss.
 
 ### Timing: when compaction runs
 
@@ -176,25 +168,26 @@ This is why compaction model choice matters so much — a slow model turns full 
 | `contextThreshold` | `0.75` | `LCM_CONTEXT_THRESHOLD` | Fraction of budget that triggers full-sweep compaction |
 | `leafChunkTokens` | `20000` | `LCM_LEAF_CHUNK_TOKENS` | Max raw tokens per leaf pass |
 | `leafTargetTokens` | `2400` | — | Target output tokens for leaf summaries |
-| `condensedTargetTokens` | `900` | — | Target output tokens for condensed summaries |
+| `condensedTargetTokens` | `2000` | — | Target output tokens for condensed summaries |
 | `freshTailCount` | `64` | `LCM_FRESH_TAIL_COUNT` | Messages protected from compaction |
 | `incrementalMaxDepth` | `1` | `LCM_INCREMENTAL_MAX_DEPTH` | Max condensation depth per turn (-1 = unlimited) |
 | `leafMinFanout` | `8` | — | Min leaf summaries before condensation |
 | `condensedMinFanout` | `4` | — | Min same-depth summaries before condensation |
 | `summaryModel` | `""` | `LCM_SUMMARY_MODEL` | Model for compaction (critical — use fast models) |
 | `summaryProvider` | `""` | `LCM_SUMMARY_PROVIDER` | Provider for compaction model |
-| `summaryTimeoutMs` | `120000` | `LCM_SUMMARY_TIMEOUT_MS` | Timeout per summarization call |
-| `leafSkipReductionThreshold` | `0.05` | `LCM_LEAF_SKIP_REDUCTION_THRESHOLD` | Cache-aware skip threshold |
-| `leafBudgetHeadroomFactor` | `0.8` | `LCM_LEAF_BUDGET_HEADROOM_FACTOR` | Budget headroom skip factor |
+| `summaryTimeoutMs` | `60000` | `LCM_SUMMARY_TIMEOUT_MS` | Timeout per summarization call (ms) |
+| `summaryMaxOverageFactor` | `3` | `LCM_SUMMARY_MAX_OVERAGE_FACTOR` | Max allowed summary size as multiple of target (forces truncation above) |
+| `circuitBreakerThreshold` | `5` | `LCM_CIRCUIT_BREAKER_THRESHOLD` | Consecutive auth failures before compaction is disabled |
+| `circuitBreakerCooldownMs` | `1800000` | `LCM_CIRCUIT_BREAKER_COOLDOWN_MS` | Cooldown before circuit breaker resets (30 min default) |
 
 ### Recommended configurations by tier
 
 | Scenario | skipThreshold | headroomFactor | leafChunkTokens | summaryModel | Rationale |
 |----------|---------------|----------------|-----------------|--------------|-----------|
-| **Opus 1M coding** | 0.02 | 0.45 | 35000 | Sonnet/Haiku | At $15/MTok, compact early and aggressively. Larger chunks = fewer cache busts. |
-| **Sonnet 200K general** | 0.05 | 0.80 | 20000 | Haiku | Defaults are calibrated here. Break-even ~13.5 turns. |
+| **Opus 1M coding** | 0.02 | 0.45 | 35000 | Sonnet/Haiku | At $15/MTok, compact early. Larger chunks = fewer cache busts. |
+| **Sonnet 200K general** | 0.05 | 0.80 | 20000 | Haiku | Defaults work here. Break-even ~13.5 turns. |
 | **Haiku quick** | 0.10 | 0.90 | 15000 | Haiku | Short sessions rarely recoup cache invalidation. |
-| **Orchestration** | 0.02 | 0.60 | 25000 | Sonnet | Sub-agents accumulate fast. Compact early to prevent cascade. |
+| **Orchestration** | 0.02 | 0.60 | 25000 | Sonnet | Sub-agents accumulate fast. Compact early. |
 
 ### Cache economics
 
@@ -208,7 +201,7 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 ### Escape hatches
 
-- `leafSkipReductionThreshold=0` — Disables the cache-aware skip. Compaction fires whenever raw tokens exceed the chunk threshold (original behavior before this feature).
+- `leafSkipReductionThreshold=0` — Disables the cache-aware skip. Compaction fires whenever raw tokens exceed the chunk threshold (original behavior).
 - `leafBudgetHeadroomFactor=0` — Disables the headroom check AND budget pressure detection. Only the cache-aware skip remains active.
 - Both set to `0` — Fully disables skip guards. Equivalent to pre-feature behavior.
 
@@ -216,7 +209,7 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 ## Advanced: Model Selection and Latency
 
-### Why model choice causes gateway lockups
+### Why model choice causes session lockups
 
 Compaction calls the LLM to summarize message chunks. Each call:
 1. Sends ~20-35K input tokens (the chunk to summarize)
@@ -225,7 +218,7 @@ Compaction calls the LLM to summarize message chunks. Each call:
 
 **Typical latency per compaction call:**
 
-| Model | Latency (20K input) | Cost per call | Gateway impact |
+| Model | Latency (20K input) | Cost per call | Session impact |
 |-------|-------------------|---------------|----------------|
 | Haiku 4.5 | 0.3-0.8s | ~$0.02 | Invisible |
 | Sonnet 4.6 | 1-3s | ~$0.10 | Brief pause |
@@ -234,15 +227,14 @@ Compaction calls the LLM to summarize message chunks. Each call:
 | **Opus 4.6** | **3-8s** | **~$0.35** | **Visible stall** |
 | **o3 / thinking** | **5-30s** | **$0.50-2.00** | **Session timeout** |
 
-A full sweep on a large context may run 5-15 compaction calls. With Opus, that's 15-120 seconds of gateway stall. With a thinking model, it can exceed the 2-minute typing timeout, causing the agent to appear dead.
+A full sweep on a large context may run 5-15 compaction calls. With Opus, that's 15-120 seconds of stall. With a thinking model, it can exceed the 2-minute typing timeout, causing the agent to appear dead.
 
-### What to use
+### Recommended compaction models
 
-**Always use non-thinking, low-latency models for compaction.** The summarization task (compress conversation into bullet points) does not benefit from chain-of-thought reasoning. Fast models produce equivalent summary quality at 10-50x lower cost and latency.
+**Always use non-thinking, low-latency models.** Summarization is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
 
-**Recommended compaction models (in order of preference):**
 1. `claude-haiku-4-5` — Best cost/latency ratio for Anthropic users
-2. `claude-sonnet-4-6` — Slightly better quality, still fast enough
+2. `claude-sonnet-4-6` — Slightly better quality, still fast
 3. `gpt-4o-mini` — Excellent for OpenAI/OpenRouter users
 4. `gemini-2.0-flash` — Good for Google/Vertex users
 
@@ -251,12 +243,39 @@ A full sweep on a large context may run 5-15 compaction calls. With Opus, that's
 - Any `o3` / `o1` / thinking model — Chain-of-thought adds 10-30s per call
 - `5.4-codex` — Actively corrupts summaries by not following format instructions
 
+### Cache-aware skip guard details
+
+The skip guards evaluate in priority order to balance cache stability against budget pressure:
+
+```mermaid
+flowchart TD
+    A["rawTokensOutsideTail >= leafChunkTokens?"] -->|No| Z["No compaction needed"]
+    A -->|Yes| B["Assembled tokens < headroom ceiling?"]
+    B -->|"Yes (has headroom)"| Y["Skip: budget headroom<br/>No pressure, preserve cache"]
+    B -->|"No / disabled"| C["Budget pressure detected?"]
+    C -->|Yes| E["COMPACT<br/>Budget pressure overrides cache"]
+    C -->|"No (headroom disabled<br/>or no tokenBudget)"| D["Reduction < 5% of total context?"]
+    D -->|Yes| X["Skip: cache-aware<br/>Reduction too small for cache cost"]
+    D -->|No| G["COMPACT<br/>Reduction is worthwhile"]
+
+    style E fill:#d4edda
+    style G fill:#d4edda
+    style Y fill:#fff3cd
+    style X fill:#fff3cd
+    style Z fill:#f8f9fa
+```
+
+**Key design principles:**
+1. **Budget pressure always wins.** When assembled tokens exceed the headroom ceiling, compaction fires unconditionally — preventing compaction starvation in large contexts.
+2. **Cache-aware skip is conservative.** It only fires when there is genuinely no budget pressure and the token savings are negligible relative to total context.
+3. **Per-pass estimation.** The reduction estimate uses `min(rawTokensOutsideTail, leafChunkTokens)` — the actual single-pass chunk size, not all raw tokens.
+
 ### Sub-agent isolation
 
-When compaction runs on the main agent session, it stalls all connected sessions sharing that gateway thread. To prevent this:
+When compaction runs on the main agent session, it stalls all connected sessions sharing that thread. To prevent this:
 
 1. **Isolate sub-agent sessions** — Configure `ignoreSessionPatterns` or `statelessSessionPatterns` to prevent sub-agents from triggering compaction
-2. **Use shorter timeouts** — Set `summaryTimeoutMs` to 30000 (30s) so failed compaction releases the gateway quickly
+2. **Use shorter timeouts** — Set `summaryTimeoutMs` to 30000 (30s) so failed compaction releases quickly
 3. **Choose fast models** — A 0.5s Haiku call is invisible even without isolation
 
 ```json
@@ -274,14 +293,14 @@ When compaction runs on the main agent session, it stalls all connected sessions
 **"Compaction never fires"** — Check:
 1. Is `leafChunkTokens` set too high? Default is 20K; if your turns are small, raw tokens may never accumulate enough.
 2. Is `leafBudgetHeadroomFactor` too high? With a large budget (1M) and default 0.8, the headroom ceiling is 600K — compaction won't fire until then.
-3. Enable debug logging to see skip reasons: `[lcm] afterTurn: leaf compaction skipped (budget-headroom: 45000 assembled < 120000 ceiling)`
+3. Enable debug logging to see skip reasons. Look for lines matching `[lcm] afterTurn: leaf compaction skipped` in stderr output.
 
 **"Compaction fires every turn"** — Check:
 1. Is `leafChunkTokens` too low? If set to 2000, compaction triggers after just 2-3 messages.
 2. Is `leafSkipReductionThreshold` too low or 0? The cache-aware skip might be disabled.
 3. Is the context near the budget threshold? Budget pressure overrides all skip guards.
 
-**"Gateway hangs during compaction"** — Check:
+**"Session hangs during compaction"** — Check:
 1. What model is used for compaction? Switch to Haiku or a mini model.
-2. Is `summaryTimeoutMs` set? Default is 120s (2 min) — lower it to 30s for faster release.
-3. Is the compaction model returning errors? Check for auth failures (circuit breaker trips after 5 consecutive failures).
+2. Is `summaryTimeoutMs` set? Default is 60s — lower it to 30s for faster release.
+3. Is the compaction model returning errors? The circuit breaker trips after `circuitBreakerThreshold` (default 5) consecutive auth failures, then cools down for `circuitBreakerCooldownMs` (default 30 min).
