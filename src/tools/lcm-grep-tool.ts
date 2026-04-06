@@ -73,7 +73,7 @@ const LcmGrepSchema = Type.Object({
   sort: Type.Optional(
     Type.String({
       description:
-        'Sort order: "recency" (newest first, default), "relevance" (best FTS5 match first, full_text mode only), or "hybrid" (blends relevance with recency).',
+        'Sort order: "recency" (newest first, default), "relevance" (best FTS5 match first, full_text mode only), or "hybrid" (blends relevance with recency). Note: relevance/hybrid re-rank within the top results by recency, so very old matches may not appear. Increase limit for broader coverage.',
       enum: ["recency", "relevance", "hybrid"],
     }),
   ),

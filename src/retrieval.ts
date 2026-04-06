@@ -262,11 +262,14 @@ export class RetrievalEngine {
     } else if (sortMode === "hybrid") {
       // Blend relevance with recency. FTS5 rank is negative (lower = better),
       // so we negate it to get a positive relevance score, then penalize age.
+      // AGE_DECAY_RATE: ~1% relevance penalty per 10 hours of age.
+      // At 100h: 10% penalty. At 1000h (~6 weeks): 50% penalty.
+      const AGE_DECAY_RATE = 0.001;
       const now = Date.now();
       const score = (item: { rank?: number; createdAt: Date }) => {
         const relevance = -(item.rank ?? 0); // higher = more relevant
         const ageHours = (now - item.createdAt.getTime()) / 3_600_000;
-        const agePenalty = 1 + ageHours * 0.001; // older items penalized
+        const agePenalty = 1 + ageHours * AGE_DECAY_RATE;
         return -(relevance / agePenalty); // negate so sort ascending = best first
       };
       // Tiebreaker: recency (newest first) when hybrid scores are equal.
