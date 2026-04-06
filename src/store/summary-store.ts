@@ -982,7 +982,6 @@ export class SummaryStore {
         updateStmt.run(i, conversationId, -(i + 1));
       }
     }
-    }
   }
 
   async getContextTokenCount(conversationId: number): Promise<number> {
