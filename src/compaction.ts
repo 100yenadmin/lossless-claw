@@ -468,7 +468,7 @@ export class CompactionEngine {
     // to prevent starvation in large contexts.
     const perPassRawTokens = Math.min(rawTokensOutsideTail, threshold);
     const estimatedReduction = perPassRawTokens - this.config.leafTargetTokens;
-    const reductionThreshold = this.config.leafSkipReductionThreshold ?? 0.05;
+    const reductionThreshold = Math.min(Math.max(this.config.leafSkipReductionThreshold ?? 0.05, 0), 1.0);
     const budgetPressure = headroomEnabled && !hasHeadroom;
     if (
       !budgetPressure &&
