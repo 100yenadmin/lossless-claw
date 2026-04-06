@@ -1356,7 +1356,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           );
           return buildDeterministicFallbackSummary(text, targetTokens);
         }
-        return "";
+        break;
       }
 
       const normalized = normalizeCompletionSummary(result.content);
@@ -1493,7 +1493,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
     if (lastAuthError) {
       throw lastAuthError;
     }
-    return "";
+    return buildDeterministicFallbackSummary(text, targetTokens);
   };
 
   return {

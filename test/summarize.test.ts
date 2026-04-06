@@ -771,10 +771,49 @@ describe("createLcmSummarizeFromLegacyParams", () => {
         expect(errorText).not.toContain("retrying with conservative settings");
         expect(errorText).not.toContain("falling back to truncation");
       } finally {
-        consoleWarn.mockRestore();
-        consoleError.mockRestore();
-      }
-    });
+      consoleWarn.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+
+  it("falls back deterministically after all resolved providers fail without auth", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const deps = makeDeps();
+      deps.config = {
+        ...deps.config,
+        fallbackProviders: [{ provider: "openai", model: "gpt-4.1-mini" }],
+      } as typeof deps.config;
+      deps.resolveModel = vi.fn((modelRef?: string, providerHint?: string) => {
+        if (modelRef === "claude-opus-4-5") {
+          return { provider: providerHint ?? "anthropic", model: "claude-opus-4-5" };
+        }
+        if (modelRef === "openai/gpt-4.1-mini") {
+          return { provider: "openai", model: "gpt-4.1-mini" };
+        }
+        throw new Error(`unexpected modelRef: ${String(modelRef)}`);
+      }) as typeof deps.resolveModel;
+      deps.complete = vi.fn(async () => {
+        throw new Error("provider backend exploded");
+      }) as typeof deps.complete;
+
+      const summarize = await createSummarizeFn({
+        deps,
+        legacyParams: { provider: "anthropic", model: "claude-opus-4-5" },
+      });
+
+      const summary = await summarize!("Q".repeat(10_000), false);
+
+      expect(summary).toContain("[LCM fallback summary; truncated for context management]");
+      expect(vi.mocked(deps.complete)).toHaveBeenCalledTimes(2);
+
+      const errorText = consoleError.mock.calls.flatMap((call) => call.map(String)).join(" ");
+      expect(errorText).toContain("PROVIDER FALLBACK");
+      expect(errorText).toContain("ALL PROVIDERS EXHAUSTED");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 
     it("preserves first-pass credential resolution but skips direct-credential retry for runtime-managed auth providers", async () => {
       const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
