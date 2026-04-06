@@ -3508,7 +3508,7 @@ describe("evaluateLeafTrigger skip guards", () => {
   });
 
   it("leafSkipReductionThreshold=0 disables cache-aware skip", async () => {
-    // Same setup as above but threshold=0 → estimatedReduction < 0 is never true
+    // Same setup as above but leafSkipReductionThreshold=0 → cache-aware skip never fires
     const engine = createCompaction({
       leafSkipReductionThreshold: 0,
     });
