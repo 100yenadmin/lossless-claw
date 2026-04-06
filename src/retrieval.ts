@@ -263,7 +263,7 @@ export class RetrievalEngine {
       // Blend relevance with recency. FTS5 rank is negative (lower = better),
       // so we negate it to get a positive relevance score, then penalize age.
       // AGE_DECAY_RATE: ~1% relevance penalty per 10 hours of age.
-      // At 100h: 10% penalty. At 1000h (~6 weeks): 50% penalty.
+      // At 100h: ~9% penalty. At 1000h (~6 weeks): ~50% penalty.
       const AGE_DECAY_RATE = 0.001;
       const now = Date.now();
       const score = (item: { rank?: number; createdAt: Date }) => {
