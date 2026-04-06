@@ -82,7 +82,8 @@ function truncateSnippet(content: string, maxLen: number = 200): string {
 
 export function createLcmGrepTool(input: {
   deps: LcmDependencies;
-  lcm: LcmContextEngine;
+  lcm?: LcmContextEngine;
+  getLcm?: () => Promise<LcmContextEngine>;
   sessionId?: string;
   sessionKey?: string;
 }): AnyAgentTool {
@@ -97,8 +98,12 @@ export function createLcmGrepTool(input: {
       "for follow-up with lcm_expand or lcm_describe.",
     parameters: LcmGrepSchema,
     async execute(_toolCallId, params) {
-      const retrieval = input.lcm.getRetrieval();
-      const timezone = input.lcm.timezone;
+      const lcm = input.lcm ?? (await input.getLcm?.());
+      if (!lcm) {
+        throw new Error("LCM engine is unavailable.");
+      }
+      const retrieval = lcm.getRetrieval();
+      const timezone = lcm.timezone;
 
       const p = params as Record<string, unknown>;
       const pattern = (p.pattern as string).trim();
@@ -121,7 +126,7 @@ export function createLcmGrepTool(input: {
         });
       }
       const conversationScope = await resolveLcmConversationScope({
-        lcm: input.lcm,
+        lcm,
         deps: input.deps,
         sessionId: input.sessionId,
         sessionKey: input.sessionKey,

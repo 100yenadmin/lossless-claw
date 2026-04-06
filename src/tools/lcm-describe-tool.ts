@@ -57,7 +57,8 @@ function normalizeRequestedTokenCap(value: unknown): number | undefined {
 
 export function createLcmDescribeTool(input: {
   deps: LcmDependencies;
-  lcm: LcmContextEngine;
+  lcm?: LcmContextEngine;
+  getLcm?: () => Promise<LcmContextEngine>;
   sessionId?: string;
   sessionKey?: string;
 }): AnyAgentTool {
@@ -71,12 +72,16 @@ export function createLcmDescribeTool(input: {
       "token counts, and file exploration results.",
     parameters: LcmDescribeSchema,
     async execute(_toolCallId, params) {
-      const retrieval = input.lcm.getRetrieval();
-      const timezone = input.lcm.timezone;
+      const lcm = input.lcm ?? (await input.getLcm?.());
+      if (!lcm) {
+        throw new Error("LCM engine is unavailable.");
+      }
+      const retrieval = lcm.getRetrieval();
+      const timezone = lcm.timezone;
       const p = params as Record<string, unknown>;
       const id = (p.id as string).trim();
       const conversationScope = await resolveLcmConversationScope({
-        lcm: input.lcm,
+        lcm,
         deps: input.deps,
         sessionId: input.sessionId,
         sessionKey: input.sessionKey,

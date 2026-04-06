@@ -444,7 +444,8 @@ async function resolveSummaryCandidates(params: {
 
 export function createLcmExpandQueryTool(input: {
   deps: LcmDependencies;
-  lcm: LcmContextEngine;
+  lcm?: LcmContextEngine;
+  getLcm?: () => Promise<LcmContextEngine>;
   /** Session id used for LCM conversation scoping. */
   sessionId?: string;
   /** Requester agent session key used for delegated child session/auth scoping. */
@@ -465,6 +466,10 @@ export function createLcmExpandQueryTool(input: {
       "and return a compact prompt-focused answer with cited summary IDs.",
     parameters: LcmExpandQuerySchema,
     async execute(_toolCallId, params) {
+      const lcm = input.lcm ?? (await input.getLcm?.());
+      if (!lcm) {
+        throw new Error("LCM engine is unavailable.");
+      }
       const p = params as Record<string, unknown>;
       const explicitSummaryIds = normalizeSummaryIds(p.summaryIds as string[] | undefined);
       const query = typeof p.query === "string" ? p.query.trim() : "";
@@ -537,7 +542,7 @@ export function createLcmExpandQueryTool(input: {
 
       try {
         const conversationScope = await resolveLcmConversationScope({
-          lcm: input.lcm,
+          lcm,
           deps: input.deps,
           sessionId: input.sessionId,
           sessionKey: input.sessionKey,
@@ -552,7 +557,7 @@ export function createLcmExpandQueryTool(input: {
           scopedConversationId = await resolveRequesterConversationScopeId({
             deps: input.deps,
             requesterSessionKey: callerSessionKey,
-            lcm: input.lcm,
+            lcm,
           });
         }
 
@@ -564,7 +569,7 @@ export function createLcmExpandQueryTool(input: {
         }
 
         const candidates = await resolveSummaryCandidates({
-          lcm: input.lcm,
+          lcm,
           explicitSummaryIds,
           query: query || undefined,
           conversationId: scopedConversationId,

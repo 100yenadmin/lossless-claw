@@ -122,7 +122,8 @@ function buildOrchestrationObservability(input: {
  */
 export function createLcmExpandTool(input: {
   deps: LcmDependencies;
-  lcm: LcmContextEngine;
+  lcm?: LcmContextEngine;
+  getLcm?: () => Promise<LcmContextEngine>;
   /** Runtime session key (used for delegated expansion auth scoping). */
   sessionId?: string;
   sessionKey?: string;
@@ -139,7 +140,11 @@ export function createLcmExpandTool(input: {
       "with cited IDs for follow-up.",
     parameters: LcmExpandSchema,
     async execute(_toolCallId, params) {
-      const retrieval = input.lcm.getRetrieval();
+      const lcm = input.lcm ?? (await input.getLcm?.());
+      if (!lcm) {
+        throw new Error("LCM engine is unavailable.");
+      }
+      const retrieval = lcm.getRetrieval();
       const orchestrator = new ExpansionOrchestrator(retrieval);
       const runtimeAuthManager = getRuntimeExpansionAuthManager();
 
@@ -178,7 +183,7 @@ export function createLcmExpandTool(input: {
       }
 
       const conversationScope = await resolveLcmConversationScope({
-        lcm: input.lcm,
+        lcm,
         deps: input.deps,
         sessionId: input.sessionId,
         sessionKey: input.sessionKey,

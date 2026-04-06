@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import lcmPlugin from "../index.js";
+import * as connectionModule from "../src/db/connection.js";
 import { closeLcmConnection } from "../src/db/connection.js";
 import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
 
 type RegisteredEngineFactory = (() => unknown) | undefined;
+type HookHandler = (event: unknown, context: unknown) => unknown;
 
 function buildApi(
   pluginConfig: Record<string, unknown>,
@@ -15,11 +17,13 @@ function buildApi(
 ): {
   api: OpenClawPluginApi;
   getFactory: () => RegisteredEngineFactory;
+  getHook: (hookName: string) => HookHandler | undefined;
   infoLog: ReturnType<typeof vi.fn>;
   warnLog: ReturnType<typeof vi.fn>;
   debugLog: ReturnType<typeof vi.fn>;
 } {
   let factory: RegisteredEngineFactory;
+  const hooks = new Map<string, HookHandler[]>();
   const infoLog = vi.fn();
   const warnLog = vi.fn();
   const debugLog = vi.fn();
@@ -75,12 +79,17 @@ function buildApi(
     registerProvider: vi.fn(),
     registerCommand: vi.fn(),
     resolvePath: vi.fn(() => agentDir),
-    on: vi.fn(),
+    on: vi.fn((hookName: string, handler: HookHandler) => {
+      const existing = hooks.get(hookName) ?? [];
+      existing.push(handler);
+      hooks.set(hookName, existing);
+    }),
   } as unknown as OpenClawPluginApi;
 
   return {
     api,
     getFactory: () => factory,
+    getHook: (hookName: string) => hooks.get(hookName)?.[0],
     infoLog,
     warnLog,
     debugLog,
@@ -135,6 +144,7 @@ describe("lcm plugin registration", () => {
     }
     dbPaths.clear();
     resetStartupBannerLogsForTests();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     for (const dir of tempDirs) {
       rmSync(dir, { recursive: true, force: true });
@@ -670,5 +680,76 @@ describe("lcm plugin registration", () => {
     await expect(engine.deps?.getApiKey(provider, "claude-sonnet-4-6")).resolves.toBe(
       "token-from-auth-store",
     );
+  });
+
+  it("waits for gateway_start when eager init hits a lock", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory, getHook } = buildApi({
+      enabled: true,
+      dbPath,
+    });
+    const originalCreate = connectionModule.createLcmDatabaseConnection;
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    createSpy.mockImplementation((path: string) => {
+      if (createSpy.mock.calls.length === 1) {
+        throw new Error("database is locked");
+      }
+      return originalCreate(path);
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    const gatewayStart = getHook("gateway_start");
+    expect(factory).toBeTypeOf("function");
+    expect(gatewayStart).toBeTypeOf("function");
+
+    let settled = false;
+    const enginePromise = Promise.resolve(factory!()).then((engine) => {
+      settled = true;
+      return engine as { config?: { databasePath?: string } };
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+    await expect(enginePromise).resolves.toMatchObject({
+      config: {
+        databasePath: dbPath,
+      },
+    });
+  });
+
+  it("surfaces deferred init failures after gateway_start runs", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+
+    const { api, getFactory, getHook } = buildApi({
+      enabled: true,
+      dbPath,
+    });
+    const createSpy = vi.spyOn(connectionModule, "createLcmDatabaseConnection");
+    createSpy.mockImplementation(() => {
+      if (createSpy.mock.calls.length === 1) {
+        throw new Error("database is locked");
+      }
+      throw new Error("deferred init exploded");
+    });
+
+    lcmPlugin.register(api);
+
+    const factory = getFactory();
+    const gatewayStart = getHook("gateway_start");
+    expect(factory).toBeTypeOf("function");
+    expect(gatewayStart).toBeTypeOf("function");
+
+    const enginePromise = Promise.resolve(factory!());
+    await gatewayStart?.({ port: 3000 }, { port: 3000 });
+
+    await expect(enginePromise).rejects.toThrow("deferred init exploded");
+    await expect(Promise.resolve(factory!())).rejects.toThrow("deferred init exploded");
   });
 });

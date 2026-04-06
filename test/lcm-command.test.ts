@@ -703,6 +703,24 @@ describe("lcm command", () => {
     expect(dbFn).toHaveBeenCalled();
     expect(result.text).toContain("**🦀 Lossless Claw");
   });
+
+  it("awaits an async lazy db function for status subcommand", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const db = createLcmDatabaseConnection(fixture.dbPath);
+    const config = resolveLcmConfig({}, { dbPath: fixture.dbPath });
+    const dbFn = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return db;
+    });
+    const command = createLcmCommand({ db: dbFn, config });
+
+    const result = await command.handler(createCommandContext());
+    expect(dbFn).toHaveBeenCalled();
+    expect(result.text).toContain("**🦀 Lossless Claw");
+  });
 });
 
 describe("lcm command helpers", () => {
