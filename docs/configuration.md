@@ -279,3 +279,47 @@ To fall back to OpenClaw's built-in compaction:
 ```
 
 Or set `LCM_ENABLED=false` to disable the plugin while keeping it registered.
+
+## Cache-aware compaction tuning
+
+Two settings control when leaf compaction skips to preserve prompt cache stability:
+
+### Skip reduction threshold
+
+`LCM_LEAF_SKIP_REDUCTION_THRESHOLD` (default `0.05`, plugin config: `leafSkipReductionThreshold`)
+
+Minimum estimated per-pass token reduction as a fraction of total assembled context. When the reduction is too small relative to total context, compaction is skipped because the prompt cache invalidation cost exceeds the token savings.
+
+- **Lower values** (e.g., 0.02) allow more compaction events — good for expensive models (Opus) where carrying extra tokens is costly.
+- **Higher values** (e.g., 0.10) are more conservative — good for short sessions or cheap models where cache stability matters more.
+- **Set to 0** to disable the cache-aware skip entirely.
+
+### Budget headroom factor
+
+`LCM_LEAF_BUDGET_HEADROOM_FACTOR` (default `0.8`, plugin config: `leafBudgetHeadroomFactor`)
+
+Skip leaf compaction when assembled tokens are below `factor x contextThreshold x tokenBudget`. When there is ample budget headroom, compaction provides no urgency and only risks cache instability.
+
+- **Lower values** (e.g., 0.45) start compacting earlier — important for expensive models where every token costs more.
+- **Higher values** (e.g., 0.90) delay compaction longer — good for cheap models where carrying extra context is acceptable.
+- **Set to 0** to disable headroom check entirely. Note: this also disables budget pressure detection, so the cache-aware skip becomes the only guard.
+
+When assembled tokens exceed the headroom ceiling, **budget pressure** is detected and compaction fires unconditionally, overriding the cache-aware skip.
+
+### Compaction model selection
+
+`LCM_SUMMARY_MODEL` / `LCM_SUMMARY_PROVIDER` — The model used for summarization during compaction.
+
+**Use fast, non-thinking models.** Compaction runs synchronously during full sweeps and can stall the gateway. Recommended:
+
+| Model | Latency | Cost | Notes |
+|-------|---------|------|-------|
+| `claude-haiku-4-5` | 0.3-0.8s | ~$0.02/call | Best cost/latency ratio |
+| `claude-sonnet-4-6` | 1-3s | ~$0.10/call | Slightly better quality |
+| `gpt-4o-mini` | 0.5-1.5s | ~$0.02/call | Good for OpenRouter |
+
+**Never use** Opus, o3, or thinking models for compaction — they add 3-30s per call with no summary quality benefit, and can cause 2-minute typing timeouts.
+
+### Per-model-tier presets
+
+See the [Compaction Tuning Guide](compaction-tuning.md) for detailed per-tier configurations with economics analysis.
