@@ -346,8 +346,14 @@ export class CompactionEngine {
    * Per-conversation context items cache, active only during compaction
    * entry points. null when inactive — external callers (e.g., engine.ts
    * evaluateLeafTrigger) get uncached reads.
+   *
+   * Uses a reference count so concurrent compactions on different
+   * conversations don't interfere: each withContextCache increments
+   * on entry and decrements on exit; the cache is only destroyed
+   * when all users have exited.
    */
   private _contextItemsCache: Map<number, ContextItemRecord[]> | null = null;
+  private _contextItemsCacheRefCount = 0;
 
   constructor(
     private conversationStore: ConversationStore,
@@ -372,14 +378,18 @@ export class CompactionEngine {
     this._contextItemsCache?.delete(conversationId);
   }
 
-  /** Execute with context cache active. Re-entrant safe. */
+  /** Execute with context cache active. Reference-counted for concurrent use. */
   private async withContextCache<T>(fn: () => Promise<T>): Promise<T> {
-    const wasActive = this._contextItemsCache !== null;
-    if (!wasActive) this._contextItemsCache = new Map();
+    if (!this._contextItemsCache) this._contextItemsCache = new Map();
+    this._contextItemsCacheRefCount++;
     try {
       return await fn();
     } finally {
-      if (!wasActive) this._contextItemsCache = null;
+      this._contextItemsCacheRefCount--;
+      if (this._contextItemsCacheRefCount <= 0) {
+        this._contextItemsCache = null;
+        this._contextItemsCacheRefCount = 0;
+      }
     }
   }
 
@@ -1402,7 +1412,7 @@ export class CompactionEngine {
     summarize: CompactionSummarizeFn,
     previousSummaryContent?: string,
     summaryModel?: string,
-  ): Promise<{ summaryId: string; level: CompactionLevel; content: string } | null> {
+  ): Promise<{ summaryId: string; level: CompactionLevel; content: string; removedTokens: number; addedTokens: number } | null> {
     // Fetch full message content for each context item
     const messageContents: { messageId: number; content: string; createdAt: Date; tokenCount: number }[] =
       [];
@@ -1450,6 +1460,11 @@ export class CompactionEngine {
     // Persist the leaf summary
     const summaryId = generateSummaryId(summary.content);
     const tokenCount = estimateTokens(summary.content);
+    // Note: removedTokens uses resolveMessageTokenCount values (which fall back to
+    // estimateTokens for messages with token_count <= 0). This can diverge from
+    // getContextTokenCount() which would sum the stored 0. In practice, messages
+    // with token_count=0 are rare (only for empty/corrupt messages) and the delta
+    // is used for soft convergence checks, not hard limits.
     const removedTokens = messageContents.reduce(
       (sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)),
       0,
