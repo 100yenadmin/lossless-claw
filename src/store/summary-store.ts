@@ -960,8 +960,8 @@ export class SummaryStore {
     // 3. Resequence all ordinals to maintain contiguity (no gaps).
     //    Pre-compute ranks from a SELECT (safe snapshot), then apply
     //    via 2-pass UPDATE loop using negative temps to avoid UNIQUE
-    //    constraint violations. The SELECT is safe because it reads
-    //    a consistent snapshot before any mutations.
+    //    constraint violations. The SELECT reads post-delete/insert
+    //    state and provides a consistent snapshot for resequencing.
     const items = this.db
       .prepare(
         `SELECT ordinal FROM context_items
