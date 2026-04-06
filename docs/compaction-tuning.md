@@ -23,6 +23,8 @@ Add these settings to your plugin config in `openclaw.json` under `plugins.entri
 {
   "summaryModel": "claude-haiku-4-5",
   "summaryProvider": "anthropic",
+  "expansionModel": "claude-haiku-4-5",
+  "expansionProvider": "anthropic",
   "leafChunkTokens": 35000,
   "leafSkipReductionThreshold": 0.02,
   "leafBudgetHeadroomFactor": 0.55
@@ -52,6 +54,8 @@ Add these settings to your plugin config in `openclaw.json` under `plugins.entri
 {
   "summaryModel": "claude-sonnet-4-6",
   "summaryProvider": "anthropic",
+  "expansionModel": "claude-haiku-4-5",
+  "expansionProvider": "anthropic",
   "leafChunkTokens": 25000,
   "leafSkipReductionThreshold": 0.02,
   "leafBudgetHeadroomFactor": 0.60
@@ -65,6 +69,25 @@ Add these settings to your plugin config in `openclaw.json` under `plugins.entri
 | GPT-4o-mini, Gemini 2.5 Flash, Haiku 4.5, Sonnet 4.6 | Opus 4.6, o3, any "thinking" model |
 
 **Why:** Compaction runs inline during your session. A slow model (Opus at 3-8s/call) stalls your conversation while it works. A fast model (Haiku at 0.3-0.8s/call) finishes before you notice. Compaction is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
+
+### Expansion model: the hidden token cost
+
+When the agent calls `lcm_expand_query` (deep recall from history), LCM spawns a **full sub-agent session** that runs 3-8 turns of grep → describe → expand → synthesize. **By default, this sub-agent uses the same model as your main agent.**
+
+If your main agent runs Opus at $5/MTok, each `lcm_expand_query` call costs **$0.15-0.50** in sub-agent tokens. Over a session with 3-5 expand calls, that's $0.50-2.50 in expansion costs alone — often more than the compaction costs.
+
+**Fix:** Set `expansionModel` to a cheaper model:
+
+```json
+{
+  "expansionModel": "claude-haiku-4-5",
+  "expansionProvider": "anthropic"
+}
+```
+
+The sub-agent does keyword search and DAG traversal — tasks that don't benefit from expensive models. Haiku handles them well at 5x lower cost.
+
+> **The "80% token savings" claim**: This measures context window reduction from compaction. It does NOT include expansion sub-agent costs or compaction model costs. Total API savings depend on your model choices for all three paths: main agent, compaction model (`summaryModel`), and expansion model (`expansionModel`).
 
 ### Verify it's working
 
@@ -175,6 +198,9 @@ This is why compaction model choice matters so much — a slow model turns full 
 | `condensedMinFanout` | `4` | — | Min same-depth summaries before condensation |
 | `summaryModel` | `""` | `LCM_SUMMARY_MODEL` | Model for compaction (critical — use fast models) |
 | `summaryProvider` | `""` | `LCM_SUMMARY_PROVIDER` | Provider for compaction model |
+| `expansionModel` | `""` | `LCM_EXPANSION_MODEL` | Model for `lcm_expand_query` sub-agent (defaults to main model — set to cheap model!) |
+| `expansionProvider` | `""` | `LCM_EXPANSION_PROVIDER` | Provider for expansion model |
+| `delegationTimeoutMs` | `120000` | `LCM_DELEGATION_TIMEOUT_MS` | Timeout for expand_query sub-agent (ms) |
 | `summaryTimeoutMs` | `60000` | `LCM_SUMMARY_TIMEOUT_MS` | Timeout per summarization call (ms) |
 | `summaryMaxOverageFactor` | `3` | `LCM_SUMMARY_MAX_OVERAGE_FACTOR` | Max allowed summary size as multiple of target (forces truncation above) |
 | `circuitBreakerThreshold` | `5` | `LCM_CIRCUIT_BREAKER_THRESHOLD` | Consecutive auth failures before compaction is disabled |
