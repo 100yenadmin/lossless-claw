@@ -269,8 +269,9 @@ export class RetrievalEngine {
         const agePenalty = 1 + ageHours * 0.001; // older items penalized
         return -(relevance / agePenalty); // negate so sort ascending = best first
       };
-      messages.sort((a, b) => score(a) - score(b));
-      summaries.sort((a, b) => score(a) - score(b));
+      // Tiebreaker: recency (newest first) when hybrid scores are equal.
+      messages.sort((a, b) => score(a) - score(b) || b.createdAt.getTime() - a.createdAt.getTime());
+      summaries.sort((a, b) => score(a) - score(b) || b.createdAt.getTime() - a.createdAt.getTime());
     } else {
       // Default: recency (newest first)
       messages.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
