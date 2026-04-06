@@ -6,6 +6,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveLcmConfig } from "../db/config.js";
 import { createLcmDatabaseConnection } from "../db/connection.js";
@@ -1545,6 +1546,19 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
   };
 }
 
+// Module-level shared init state so that subsequent register() calls
+// (from deferred plugin reloads) can reuse the already-opened DB
+// connection rather than trying to re-open and hitting the lock.
+let sharedInit: {
+  dbPath: string;
+  database: DatabaseSync | null;
+  lcm: LcmContextEngine | null;
+  initError: Error | null;
+  ready: Promise<void>;
+  resolveReady: () => void;
+  rejectReady: (err: Error) => void;
+} | null = null;
+
 const lcmPlugin = {
   id: "lossless-claw",
   name: "Lossless Context Management",
@@ -1563,11 +1577,104 @@ const lcmPlugin = {
 
   register(api: OpenClawPluginApi) {
     const deps = createLcmDependencies(api);
-    const database = createLcmDatabaseConnection(deps.config.databasePath);
-    const lcm = new LcmContextEngine(deps, database);
 
+    // ── Deferred DB initialization ──────────────────────────────────
+    // The database connection and migrations are deferred until the
+    // gateway_start hook fires.  This hook runs AFTER the HTTP server
+    // binds its port and stale gateway processes have been killed,
+    // which prevents "database is locked" errors caused by orphan
+    // gateway processes holding a write-lock on lcm.db during startup
+    // races (especially on macOS with launchd KeepAlive restarts).
+    //
+    // Because the gateway may re-run register() for deferred plugin
+    // reloads (after gateway_start already fired), we share the init
+    // state at module scope so subsequent register() calls see the
+    // already-initialized database and engine.
+
+    function logBanner(): void {
+      logStartupBannerOnce({
+        key: "plugin-loaded",
+        log: (message) => console.error(message),
+        message: `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold})`,
+      });
+      logStartupBannerOnce({
+        key: "compaction-model",
+        log: (message) => console.error(message),
+        message: buildCompactionModelLog({
+          config: deps.config,
+          openClawConfig: api.config,
+          defaultProvider: process.env.OPENCLAW_PROVIDER?.trim() ?? "",
+        }),
+      });
+    }
+
+    if (!sharedInit || sharedInit.dbPath !== deps.config.databasePath) {
+      // First register() call — create a deferred promise.
+      // The gateway_start hook will resolve it.
+      let resolveReady!: () => void;
+      let rejectReady!: (err: Error) => void;
+      const readyPromise = new Promise<void>((res, rej) => {
+        resolveReady = res;
+        rejectReady = rej;
+      });
+      sharedInit = {
+        dbPath: deps.config.databasePath,
+        database: null,
+        lcm: null,
+        initError: null,
+        ready: readyPromise,
+        resolveReady,
+        rejectReady,
+      };
+
+      api.on("gateway_start", async () => {
+        const si = sharedInit!;
+        if (si.database) return; // already initialized
+        try {
+          si.database = createLcmDatabaseConnection(si.dbPath);
+          si.lcm = new LcmContextEngine(deps, si.database);
+          si.resolveReady();
+          logBanner();
+        } catch (err) {
+          si.initError = err instanceof Error ? err : new Error(String(err));
+          si.rejectReady(si.initError);
+          console.error(
+            `[lcm] Deferred initialization failed: ${si.initError.message}`,
+          );
+        }
+      });
+    } else if (!sharedInit.database && !sharedInit.initError) {
+      // Subsequent register() call before gateway_start has fired.
+      // The DB should be safe to open now (port is bound on reloads).
+      try {
+        sharedInit.database = createLcmDatabaseConnection(sharedInit.dbPath);
+        sharedInit.lcm = new LcmContextEngine(deps, sharedInit.database);
+        sharedInit.resolveReady();
+        logBanner();
+      } catch {
+        // Suppress — gateway_start handler will handle it.
+      }
+    }
+
+    const init = sharedInit;
+
+    function ensureInitialized(): { database: DatabaseSync; lcm: LcmContextEngine } {
+      if (init.initError) {
+        throw new Error(`[lcm] Initialization failed: ${init.initError.message}`);
+      }
+      if (!init.database || !init.lcm) {
+        throw new Error(
+          "[lcm] Plugin not yet initialized — waiting for gateway_start",
+        );
+      }
+      return { database: init.database, lcm: init.lcm };
+    }
+
+    // ── Event handlers ──────────────────────────────────────────────
     api.on("before_reset", async (event, ctx) => {
-      await lcm.handleBeforeReset({
+      await init.ready;
+      const { lcm: engine } = ensureInitialized();
+      await engine.handleBeforeReset({
         reason: event.reason,
         sessionId: ctx.sessionId,
         sessionKey: ctx.sessionKey,
@@ -1577,8 +1684,10 @@ const lcmPlugin = {
       prependSystemContext: LOSSLESS_RECALL_POLICY_PROMPT,
     }));
     api.on("session_end", async (event) => {
+      await init.ready;
+      const { lcm: engine } = ensureInitialized();
       const lifecycleEvent = event as SessionEndLifecycleEvent;
-      await lcm.handleSessionEnd({
+      await engine.handleSessionEnd({
         reason: lifecycleEvent.reason,
         sessionId: lifecycleEvent.sessionId,
         sessionKey: lifecycleEvent.sessionKey,
@@ -1586,59 +1695,50 @@ const lcmPlugin = {
         nextSessionKey: lifecycleEvent.nextSessionKey,
       });
     });
-    api.registerContextEngine("lossless-claw", () => lcm);
-    api.registerContextEngine("default", () => lcm);
+
+    // ── Context engines ─────────────────────────────────────────────
+    api.registerContextEngine("lossless-claw", () => ensureInitialized().lcm);
+    api.registerContextEngine("default", () => ensureInitialized().lcm);
+
+    // ── Tools ───────────────────────────────────────────────────────
     api.registerTool((ctx) =>
       createLcmGrepTool({
         deps,
-        lcm,
+        lcm: ensureInitialized().lcm,
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmDescribeTool({
         deps,
-        lcm,
+        lcm: ensureInitialized().lcm,
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmExpandTool({
         deps,
-        lcm,
+        lcm: ensureInitialized().lcm,
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmExpandQueryTool({
         deps,
-        lcm,
+        lcm: ensureInitialized().lcm,
         sessionKey: ctx.sessionKey,
         requesterSessionKey: ctx.sessionKey,
       }),
     );
+
+    // ── Command ─────────────────────────────────────────────────────
     api.registerCommand(
       createLcmCommand({
-        db: database,
+        get db() { return ensureInitialized().database; },
         config: deps.config,
         deps,
-      }),
+      } as { db: DatabaseSync; config: typeof deps.config; deps: typeof deps }),
     );
-
-    logStartupBannerOnce({
-      key: "plugin-loaded",
-      log: (message) => console.error(message),
-      message: `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold})`,
-    });
-    logStartupBannerOnce({
-      key: "compaction-model",
-      log: (message) => console.error(message),
-      message: buildCompactionModelLog({
-        config: deps.config,
-        openClawConfig: api.config,
-        defaultProvider: process.env.OPENCLAW_PROVIDER?.trim() ?? "",
-      }),
-    });
   },
 };
 
