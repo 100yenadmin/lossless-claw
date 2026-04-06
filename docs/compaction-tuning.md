@@ -21,11 +21,11 @@ Add these settings to your plugin config in `openclaw.json` under `plugins.entri
 **Opus 4.6 (1M context, heavy coding)**
 ```json
 {
-  "summaryModel": "claude-sonnet-4-6",
+  "summaryModel": "claude-haiku-4-5",
   "summaryProvider": "anthropic",
   "leafChunkTokens": 35000,
   "leafSkipReductionThreshold": 0.02,
-  "leafBudgetHeadroomFactor": 0.45
+  "leafBudgetHeadroomFactor": 0.55
 }
 ```
 
@@ -184,7 +184,7 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 | Scenario | skipThreshold | headroomFactor | leafChunkTokens | summaryModel | Rationale |
 |----------|---------------|----------------|-----------------|--------------|-----------|
-| **Opus 1M coding** | 0.02 | 0.45 | 35000 | Sonnet/Haiku | At $5/MTok (most expensive tier), compact early. Larger chunks = fewer cache busts. |
+| **Opus 1M coding** | 0.02 | 0.55 | 35000 | Haiku/GPT-4o-mini | At $5/MTok, moderate early compaction. Larger chunks = fewer cache busts. |
 | **Sonnet 200K general** | 0.05 | 0.80 | 20000 | Haiku | Defaults work here. Break-even ~13.5 turns. |
 | **Haiku quick** | 0.10 | 0.90 | 15000 | Haiku | Short sessions rarely recoup cache invalidation. |
 | **Orchestration** | 0.02 | 0.60 | 25000 | Sonnet | Sub-agents accumulate fast. Compact early. |
@@ -218,30 +218,41 @@ Compaction calls the LLM to summarize message chunks. Each call:
 2. Receives ~600-2400 output tokens (the summary)
 3. Blocks until complete (full sweep is synchronous)
 
-**Typical latency per compaction call:**
+**Compaction model comparison** (cost per call = 20K input + 2.4K output):
 
-| Model | Latency (20K input) | Cost per call | Session impact |
-|-------|-------------------|---------------|----------------|
-| Haiku 4.5 | 0.3-0.8s | ~$0.03 | Invisible |
-| Sonnet 4.6 | 1-3s | ~$0.10 | Brief pause |
-| Gemini 2.5 Flash | 0.5-1.5s | ~$0.01 | Invisible |
-| GPT-4o-mini | 0.5-1.5s | ~$0.005 | Invisible |
-| **Opus 4.6** | **3-8s** | **~$0.13** | **Visible stall** |
-| **o3 / thinking** | **5-30s** | **$0.50+** | **Session timeout** |
+| Model | Input $/MTok | Output $/MTok | Cost/call | Context | Latency | Notes |
+|-------|-------------|--------------|-----------|---------|---------|-------|
+| GPT-4o-mini | $0.15 | $0.60 | **$0.004** | 128K | 0.5-1.5s | Cheapest, auto caching (50% off) |
+| Gemini 2.5 Flash | $0.30 | $2.50 | **$0.012** | 1M | 0.3-1s | Fastest TTFT, 90% cache discount |
+| Mistral Small 4 | $0.15 | $0.60 | **$0.004** | 256K | 0.5-1.5s | Good context headroom |
+| DeepSeek V3 | $0.28 | $0.42 | **$0.007** | 164K | 1-2s | 90% auto cache, cheapest cached |
+| GPT-4.1-mini | $0.40 | $1.60 | **$0.012** | 1M | 0.5-1.5s | 1M context, 75% cache discount |
+| MiniMax-Text-01 | $0.20 | $1.10 | **$0.007** | 4M | ~1s | Largest context window |
+| Haiku 4.5 | $1.00 | $5.00 | **$0.032** | 200K | 0.3-0.8s | Best Anthropic option |
+| GPT-5.4-mini | $0.75 | $4.50 | **$0.026** | 400K | 0.5-1s | 90% cache, 128K max output |
+| Sonnet 4.6 | $3.00 | $15.00 | **$0.096** | 1M | 1-3s | Higher quality, expensive |
+| **Opus 4.6** | **$5.00** | **$25.00** | **$0.160** | **1M** | **3-8s** | **Never use for compaction** |
 
-A full sweep on a large context may run 5-15 compaction calls. With Opus, that's 15-120 seconds of stall. With a thinking model, it can exceed the 2-minute typing timeout, causing the agent to appear dead.
+> **Context window note:** The compaction model only receives the chunk being compressed (~20-35K tokens + ~5K overhead), NOT the full conversation. A 128K model works fine for default settings. Set `leafChunkTokens` below your compaction model's context window minus 7K (for overhead + output).
+
+A full sweep may run 5-15 compaction calls. With Opus, that's 15-120 seconds of stall. With GPT-4o-mini or Gemini Flash, it's 3-15 seconds total.
 
 ### Recommended compaction models
 
 **Always use non-thinking, low-latency models.** Summarization is a straightforward extraction task — expensive models don't produce meaningfully better summaries.
 
-1. `gpt-4o-mini` — Cheapest option (~$0.005/call), good quality, automatic prompt caching
-2. `gemini-2.5-flash` — Very cheap (~$0.01/call), fastest TTFT, 90% cache discount on Vertex
-3. `claude-haiku-4-5` — Best Anthropic option (~$0.03/call), 165 tokens/sec throughput
-4. `claude-sonnet-4-6` — Higher quality (~$0.10/call), still fast enough for most sessions
+**Budget tier** (~$0.004-0.007/call):
+1. `gpt-4o-mini` — Cheapest, automatic caching, 128K context
+2. `mistral-small-4` — Same price tier, 256K context
+3. `deepseek-v3` — Auto 90% cache, good value
+
+**Mid tier** (~$0.01-0.03/call):
+4. `gemini-2.5-flash` — Fastest TTFT, 1M context, 90% cache on Vertex
+5. `gpt-4.1-mini` — 1M context, 75% cache discount
+6. `claude-haiku-4-5` — Best Anthropic option, reliable output format
 
 **Never use for compaction:**
-- `claude-opus-4-6` — 5x slower, 5x more expensive, no quality benefit
+- `claude-opus-4-6` — 40x more expensive than GPT-4o-mini, 3-8s latency, no quality benefit
 - Any `o3` / `o1` / thinking model — Chain-of-thought adds 10-30s per call
 - `5.4-codex` — Actively corrupts summaries by not following format instructions
 

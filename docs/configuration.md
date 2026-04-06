@@ -312,12 +312,15 @@ When assembled tokens exceed the headroom ceiling, **budget pressure** is detect
 
 **Use fast, non-thinking models.** Compaction runs synchronously during full sweeps and can stall the gateway. Recommended:
 
-| Model | Latency | Cost | Notes |
-|-------|---------|------|-------|
-| `gpt-4o-mini` | 0.5-1.5s | ~$0.005/call | Cheapest, automatic caching |
-| `gemini-2.5-flash` | 0.5-1.5s | ~$0.01/call | Fastest TTFT |
-| `claude-haiku-4-5` | 0.3-0.8s | ~$0.03/call | Best Anthropic option |
-| `claude-sonnet-4-6` | 1-3s | ~$0.10/call | Higher quality, still fast |
+| Model | Cost/call | Context | Notes |
+|-------|-----------|---------|-------|
+| `gpt-4o-mini` | ~$0.004 | 128K | Cheapest, auto caching |
+| `mistral-small-4` | ~$0.004 | 256K | Same price, bigger context |
+| `deepseek-v3` | ~$0.007 | 164K | 90% auto cache |
+| `gemini-2.5-flash` | ~$0.012 | 1M | Fastest, 90% cache |
+| `claude-haiku-4-5` | ~$0.032 | 200K | Best Anthropic option |
+
+> The compaction model only processes the chunk (~20-35K tokens), not the full conversation. A 128K model works fine at default settings.
 
 **Never use** Opus, o3, or thinking models for compaction — they add 3-30s per call with no summary quality benefit, and can cause 2-minute typing timeouts.
 
