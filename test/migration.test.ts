@@ -259,6 +259,14 @@ describe("runLcmMigrations summary depth backfill", () => {
       "WHERE session_key IS NOT NULL AND active = 1",
     );
 
+    // Verify perf indexes from #291
+    const allIndexRows = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`)
+      .all() as Array<{ name: string }>;
+    const allIndexNames = new Set(allIndexRows.map((r) => r.name));
+    expect(allIndexNames.has("summary_messages_message_idx")).toBe(true);
+    expect(allIndexNames.has("summaries_conv_depth_kind_idx")).toBe(true);
+
     db.prepare(
       `INSERT INTO conversations (session_id, session_key, active, archived_at)
        VALUES (?, ?, 0, datetime('now'))`,
