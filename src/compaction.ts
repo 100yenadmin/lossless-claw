@@ -68,7 +68,14 @@ type CompactionSummarizeFn = (
   aggressive?: boolean,
   options?: CompactionSummarizeOptions,
 ) => Promise<string>;
-type PassResult = { summaryId: string; level: CompactionLevel };
+type PassResult = {
+  summaryId: string;
+  level: CompactionLevel;
+  /** Token count of source items removed from context. */
+  removedTokens: number;
+  /** Token count of the newly created summary. */
+  addedTokens: number;
+};
 type LeafChunkSelection = {
   items: ContextItemRecord[];
   rawTokensOutsideTail: number;
@@ -516,7 +523,8 @@ export class CompactionEngine {
         authFailure: true,
       };
     }
-    const tokensAfterLeaf = await this.summaryStore.getContextTokenCount(conversationId);
+    // Delta tracking: compute token change from pass results instead of re-querying DB
+    const tokensAfterLeaf = tokensBefore - leafResult.removedTokens + leafResult.addedTokens;
 
     await this.persistCompactionEvents({
       conversationId,
@@ -534,6 +542,7 @@ export class CompactionEngine {
 
     const incrementalMaxDepth = this.resolveIncrementalMaxDepth();
     const condensedMinChunkTokens = this.resolveCondensedMinChunkTokens();
+    let runningTokens = tokensAfterLeaf;
     if (incrementalMaxDepth > 0) {
       for (let targetDepth = 0; targetDepth < incrementalMaxDepth; targetDepth++) {
         const fanout = this.resolveFanoutForDepth(targetDepth, false);
@@ -542,7 +551,7 @@ export class CompactionEngine {
           break;
         }
 
-        const passTokensBefore = await this.summaryStore.getContextTokenCount(conversationId);
+        const passTokensBefore = runningTokens;
         const condenseResult = await this.condensedPass(
           conversationId,
           chunk.items,
@@ -553,7 +562,7 @@ export class CompactionEngine {
         if (!condenseResult) {
           break;
         }
-        const passTokensAfter = await this.summaryStore.getContextTokenCount(conversationId);
+        const passTokensAfter = passTokensBefore - condenseResult.removedTokens + condenseResult.addedTokens;
         await this.persistCompactionEvents({
           conversationId,
           tokensBefore: passTokensBefore,
@@ -564,6 +573,7 @@ export class CompactionEngine {
         });
 
         tokensAfter = passTokensAfter;
+        runningTokens = passTokensAfter;
         condensed = true;
         createdSummaryId = condenseResult.summaryId;
         level = condenseResult.level;
@@ -633,13 +643,16 @@ export class CompactionEngine {
     let hadAuthFailure = false;
 
     // Phase 1: leaf passes over oldest raw chunks outside the protected tail.
+    // Delta tracking: maintain a running token count instead of re-querying DB
+    // after each pass. The arithmetic is exact: tokensAfter = tokensBefore - removed + added.
+    let runningTokens = tokensBefore;
     while (true) {
       const leafChunk = await this.selectOldestLeafChunk(conversationId);
       if (leafChunk.items.length === 0) {
         break;
       }
 
-      const passTokensBefore = await this.summaryStore.getContextTokenCount(conversationId);
+      const passTokensBefore = runningTokens;
       const leafResult = await this.leafPass(
         conversationId,
         leafChunk.items,
@@ -651,7 +664,7 @@ export class CompactionEngine {
         hadAuthFailure = true;
         break;
       }
-      const passTokensAfter = await this.summaryStore.getContextTokenCount(conversationId);
+      const passTokensAfter = passTokensBefore - leafResult.removedTokens + leafResult.addedTokens;
       await this.persistCompactionEvents({
         conversationId,
         tokensBefore: passTokensBefore,
@@ -665,6 +678,7 @@ export class CompactionEngine {
       createdSummaryId = leafResult.summaryId;
       level = leafResult.level;
       previousSummaryContent = leafResult.content;
+      runningTokens = passTokensAfter;
 
       if (!force && passTokensAfter <= threshold) {
         previousTokens = passTokensAfter;
@@ -686,7 +700,7 @@ export class CompactionEngine {
         break;
       }
 
-      const passTokensBefore = await this.summaryStore.getContextTokenCount(conversationId);
+      const passTokensBefore = runningTokens;
       const condenseResult = await this.condensedPass(
         conversationId,
         candidate.chunk.items,
@@ -698,7 +712,7 @@ export class CompactionEngine {
         hadAuthFailure = true;
         break;
       }
-      const passTokensAfter = await this.summaryStore.getContextTokenCount(conversationId);
+      const passTokensAfter = passTokensBefore - condenseResult.removedTokens + condenseResult.addedTokens;
       await this.persistCompactionEvents({
         conversationId,
         tokensBefore: passTokensBefore,
@@ -712,6 +726,7 @@ export class CompactionEngine {
       condensed = true;
       createdSummaryId = condenseResult.summaryId;
       level = condenseResult.level;
+      runningTokens = passTokensAfter;
 
       if (!force && passTokensAfter <= threshold) {
         previousTokens = passTokensAfter;
@@ -723,7 +738,7 @@ export class CompactionEngine {
       previousTokens = passTokensAfter;
     }
 
-    const tokensAfter = await this.summaryStore.getContextTokenCount(conversationId);
+    const tokensAfter = runningTokens;
 
     return {
       actionTaken,
@@ -820,8 +835,8 @@ export class CompactionEngine {
       lastTokens = result.tokensAfter;
     }
 
-    // Exhausted all rounds
-    const finalTokens = await this.summaryStore.getContextTokenCount(conversationId);
+    // Exhausted all rounds — use the last known token count from compact() result
+    const finalTokens = lastTokens;
     return {
       success: finalTokens <= targetTokens,
       rounds: this.config.maxRounds,
@@ -1435,6 +1450,10 @@ export class CompactionEngine {
     // Persist the leaf summary
     const summaryId = generateSummaryId(summary.content);
     const tokenCount = estimateTokens(summary.content);
+    const removedTokens = messageContents.reduce(
+      (sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)),
+      0,
+    );
 
     await this.summaryStore.withTransaction(async () => {
       await this.summaryStore.insertSummary({
@@ -1455,10 +1474,7 @@ export class CompactionEngine {
             : undefined,
         descendantCount: 0,
         descendantTokenCount: 0,
-        sourceMessageTokenCount: messageContents.reduce(
-          (sum, message) => sum + Math.max(0, Math.floor(message.tokenCount)),
-          0,
-        ),
+        sourceMessageTokenCount: removedTokens,
         model: summaryModel,
       });
 
@@ -1480,7 +1496,7 @@ export class CompactionEngine {
     });
     this.invalidateContextCache(conversationId);
 
-    return { summaryId, level: summary.level, content: summary.content };
+    return { summaryId, level: summary.level, content: summary.content, removedTokens, addedTokens: tokenCount };
   }
 
   // ── Private: Condensed Pass ──────────────────────────────────────────────
@@ -1620,7 +1636,11 @@ export class CompactionEngine {
     });
     this.invalidateContextCache(conversationId);
 
-    return { summaryId, level: condensed.level };
+    const removedTokens = summaryRecords.reduce(
+      (sum, s) => sum + Math.max(0, Math.floor(s.tokenCount)),
+      0,
+    );
+    return { summaryId, level: condensed.level, removedTokens, addedTokens: tokenCount };
   }
 
   /** Emit compaction telemetry without mutating canonical conversation history. */
