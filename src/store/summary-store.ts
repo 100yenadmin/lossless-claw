@@ -957,28 +957,29 @@ export class SummaryStore {
       )
       .run(conversationId, startOrdinal, summaryId);
 
-    // 3. Resequence all ordinals to maintain contiguity (no gaps).
-    //    Fetch current items, then update ordinals in order.
-    const items = this.db
-      .prepare(
-        `SELECT ordinal FROM context_items
-         WHERE conversation_id = ?
-         ORDER BY ordinal`,
-      )
-      .all(conversationId) as unknown as { ordinal: number }[];
-
-    const updateStmt = this.db.prepare(
-      `UPDATE context_items
-       SET ordinal = ?
-       WHERE conversation_id = ? AND ordinal = ?`,
-    );
-
-    // Use negative temp ordinals first to avoid unique constraint conflicts.
-    for (let i = 0; i < items.length; i++) {
-      updateStmt.run(-(i + 1), conversationId, items[i].ordinal);
+    // 3. Resequence ordinals to maintain contiguity (no gaps).
+    //    Two bulk UPDATEs using negative temps to avoid UNIQUE
+    //    constraint violations — same semantics as the previous
+    //    2×N individual-UPDATE loop but O(2) statements instead of O(2N).
+    const gap = endOrdinal - startOrdinal; // items removed minus 1 inserted
+    if (gap > 0) {
+      // Step 3a: shift items above the deleted range to negative space
+      this.db
+        .prepare(
+          `UPDATE context_items
+           SET ordinal = -(ordinal - ?)
+           WHERE conversation_id = ? AND ordinal > ?`,
+        )
+        .run(gap, conversationId, endOrdinal);
+      // Step 3b: flip negatives to positive (final contiguous ordinals)
+      this.db
+        .prepare(
+          `UPDATE context_items
+           SET ordinal = -ordinal
+           WHERE conversation_id = ? AND ordinal < 0`,
+        )
+        .run(conversationId);
     }
-    for (let i = 0; i < items.length; i++) {
-      updateStmt.run(i, conversationId, -(i + 1));
     }
   }
 
