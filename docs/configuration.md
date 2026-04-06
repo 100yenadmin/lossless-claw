@@ -304,7 +304,7 @@ Skip leaf compaction when assembled tokens are below `factor x contextThreshold 
 - **Higher values** (e.g., 0.90) delay compaction longer — good for cheap models where carrying extra context is acceptable.
 - **Set to 0** to disable headroom check entirely. Note: this also disables budget pressure detection, so the cache-aware skip becomes the only guard.
 
-When assembled tokens exceed the headroom ceiling, **budget pressure** is detected and compaction fires unconditionally, overriding the cache-aware skip.
+When assembled tokens reach or exceed the headroom ceiling, **budget pressure** is detected and compaction fires unconditionally, overriding the cache-aware skip.
 
 ### Compaction model selection
 

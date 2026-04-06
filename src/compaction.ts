@@ -461,7 +461,7 @@ export class CompactionEngine {
     //
     // This skip is gated on !budgetPressure.  Budget pressure is true
     // only when headroom is enabled (factor > 0, tokenBudget provided)
-    // AND assembled tokens exceed the headroom ceiling.  When the
+    // AND assembled tokens reach or exceed the headroom ceiling.  When the
     // headroom check is disabled or tokenBudget is missing, there is
     // no budget pressure signal, so the cache-aware skip can fire.
     // When budget pressure IS detected, compaction fires unconditionally

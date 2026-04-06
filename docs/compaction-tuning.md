@@ -305,7 +305,7 @@ flowchart TD
 ```
 
 **Key design principles:**
-1. **Budget pressure always wins.** When assembled tokens exceed the headroom ceiling, compaction fires unconditionally — preventing compaction starvation in large contexts.
+1. **Budget pressure always wins.** When assembled tokens reach or exceed the headroom ceiling, compaction fires unconditionally — preventing compaction starvation in large contexts.
 2. **Cache-aware skip is conservative.** It only fires when there is genuinely no budget pressure and the token savings are negligible relative to total context.
 3. **Per-pass estimation.** The reduction estimate uses `min(rawTokensOutsideTail, leafChunkTokens)` — the actual single-pass chunk size, not all raw tokens.
 

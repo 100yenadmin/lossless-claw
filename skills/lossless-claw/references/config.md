@@ -97,7 +97,7 @@ Controls the budget headroom compaction skip. Skip leaf compaction when assemble
 - Higher (0.90): delay compaction — acceptable for cheap models
 - Set to `0` to disable headroom check (also disables budget pressure detection)
 
-When assembled tokens exceed the headroom ceiling, budget pressure overrides cache-aware skip — compaction fires unconditionally.
+When assembled tokens reach or exceed the headroom ceiling, budget pressure overrides cache-aware skip — compaction fires unconditionally.
 
 ### `expansionModel` and `expansionProvider`
 

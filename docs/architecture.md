@@ -116,7 +116,7 @@ flowchart TD
     D -->|No| G["COMPACT"]
 ```
 
-**Budget pressure priority:** When assembled tokens exceed the headroom ceiling (default 80% of `contextThreshold x tokenBudget`), compaction fires unconditionally — budget pressure overrides cache concerns. This prevents compaction starvation in large contexts.
+**Budget pressure priority:** When assembled tokens reach or exceed the headroom ceiling (default 80% of `contextThreshold x tokenBudget`), compaction fires unconditionally — budget pressure overrides cache concerns. This prevents compaction starvation in large contexts.
 
 **Cache-aware skip:** When there is no budget pressure, compaction is skipped if the estimated per-pass token reduction is less than `leafSkipReductionThreshold` (default 5%) of total assembled tokens. This preserves prompt cache stability when the compression gain is negligible.
 
