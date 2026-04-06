@@ -120,7 +120,7 @@ flowchart TD
 
 **Cache-aware skip:** When there is no budget pressure, compaction is skipped if the estimated per-pass token reduction is less than `leafSkipReductionThreshold` (default 5%) of total assembled tokens. This preserves prompt cache stability when the compression gain is negligible.
 
-**Prompt cache impact:** Every compaction pass replaces messages with a summary and resequences all ordinals to maintain contiguity. This changes the assembled prompt structure, invalidating the API prompt cache prefix. On expensive models (Opus at $15/MTok), a single cache miss on 150K cached tokens costs ~$2.
+**Prompt cache impact:** Every compaction pass replaces messages with a summary and resequences all ordinals to maintain contiguity. This changes the assembled prompt structure, invalidating the API prompt cache prefix. On expensive models (Opus 4.6 at $5/MTok input, $0.50/MTok cached), a single cache miss on 150K cached tokens costs ~$0.68.
 
 See [Compaction Tuning Guide](compaction-tuning.md) for per-model-tier configuration recommendations and economics analysis.
 

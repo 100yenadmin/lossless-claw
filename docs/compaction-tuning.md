@@ -4,7 +4,7 @@
 
 Lossless Claw compresses your conversation history into summaries so long sessions don't blow the context window or your API bill. On a 200-turn Opus session, proper tuning can cut input token costs by 40-60%.
 
-> **Example:** A 200-turn Opus coding session costs ~$12 in input tokens without compaction tuning. With the recommended Opus config below and Sonnet as the compaction model, effective cost drops to ~$5.50 (compaction overhead: ~$0.40). **Net savings: ~$6/session.**
+> **Example:** A 200-turn Opus coding session costs ~$4 in input tokens without compaction tuning. With the recommended Opus config below and Sonnet as the compaction model, effective cost drops to ~$1.80 (compaction overhead: ~$0.40). **Net savings: ~$1.80/session (45%).**
 
 **Three things to configure:**
 
@@ -131,7 +131,7 @@ When a leaf pass runs, it:
 2. Resequences all remaining positions to stay contiguous (0, 1, 2, ...)
 3. The assembled prompt changes structure — the API prompt cache prefix no longer matches
 
-**Cache miss cost:** On Opus 4.6, a 150K cached prefix costs $1.50/MTok to read. A cache miss on that prefix costs $15/MTok — a **10x penalty**. One unnecessary compaction can cost $2+ in a single cache miss.
+**Cache miss cost:** On Opus 4.6, a 150K cached prefix costs $0.50/MTok to read. A cache miss on that prefix costs $5/MTok — a **10x penalty**. One unnecessary compaction can cost $0.68 in a single cache miss.
 
 ### Timing: when compaction runs
 
@@ -184,7 +184,7 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 | Scenario | skipThreshold | headroomFactor | leafChunkTokens | summaryModel | Rationale |
 |----------|---------------|----------------|-----------------|--------------|-----------|
-| **Opus 1M coding** | 0.02 | 0.45 | 35000 | Sonnet/Haiku | At $15/MTok, compact early. Larger chunks = fewer cache busts. |
+| **Opus 1M coding** | 0.02 | 0.45 | 35000 | Sonnet/Haiku | At $5/MTok (most expensive tier), compact early. Larger chunks = fewer cache busts. |
 | **Sonnet 200K general** | 0.05 | 0.80 | 20000 | Haiku | Defaults work here. Break-even ~13.5 turns. |
 | **Haiku quick** | 0.10 | 0.90 | 15000 | Haiku | Short sessions rarely recoup cache invalidation. |
 | **Orchestration** | 0.02 | 0.60 | 25000 | Sonnet | Sub-agents accumulate fast. Compact early. |
@@ -193,9 +193,11 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 | Model | Input $/MTok | Cached $/MTok | Cache miss penalty | Miss on 150K cached |
 |-------|-------------|---------------|-------------------|-------------------|
-| Opus 4.6 | $15.00 | $1.50 | $13.50/MTok | **$2.03** |
+| Opus 4.6 | $5.00 | $0.50 | $4.50/MTok | **$0.68** |
 | Sonnet 4.6 | $3.00 | $0.30 | $2.70/MTok | **$0.41** |
-| Haiku 4.5 | $0.80 | $0.08 | $0.72/MTok | **$0.11** |
+| Haiku 4.5 | $1.00 | $0.10 | $0.90/MTok | **$0.14** |
+
+> **Note:** Cached input is always 1/10 of the base input price across all Anthropic models. Cache TTL is 5 minutes (refreshed on each hit).
 
 **Break-even formula:** A compaction saving X tokens/turn that invalidates Y cached tokens takes `(Y x miss_penalty) / (X x input_price)` turns to pay back. For typical values (150K cached, 10K saved): **~13.5 turns** regardless of model tier.
 
@@ -224,7 +226,7 @@ Compaction calls the LLM to summarize message chunks. Each call:
 | Sonnet 4.6 | 1-3s | ~$0.10 | Brief pause |
 | Gemini Flash | 0.5-1.5s | ~$0.03 | Invisible |
 | GPT-4o-mini | 0.5-1.5s | ~$0.02 | Invisible |
-| **Opus 4.6** | **3-8s** | **~$0.35** | **Visible stall** |
+| **Opus 4.6** | **3-8s** | **~$0.13** | **Visible stall** |
 | **o3 / thinking** | **5-30s** | **$0.50-2.00** | **Session timeout** |
 
 A full sweep on a large context may run 5-15 compaction calls. With Opus, that's 15-120 seconds of stall. With a thinking model, it can exceed the 2-minute typing timeout, causing the agent to appear dead.
