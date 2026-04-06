@@ -1667,7 +1667,7 @@ const lcmPlugin = {
       } catch (err) {
         // Clean up partial state
         if (db) {
-          try { db.close(); } catch { /* ignore cleanup error */ }
+          try { closeLcmConnection(db); } catch { /* ignore cleanup error */ }
         }
         sharedDb.initError =
           err instanceof Error ? err : new Error(String(err));
@@ -1769,10 +1769,10 @@ const lcmPlugin = {
     // ── Command ─────────────────────────────────────────────────────
     api.registerCommand(
       createLcmCommand({
-        get db() { return getDatabase(); },
+        db: () => getDatabase(),
         config: deps.config,
         deps,
-      } as { db: DatabaseSync; config: typeof deps.config; deps: typeof deps }),
+      }),
     );
 
     logStartupBannerOnce({
