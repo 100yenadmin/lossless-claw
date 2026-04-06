@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveLcmConfig } from "../db/config.js";
-import { createLcmDatabaseConnection } from "../db/connection.js";
+import { closeLcmConnection, createLcmDatabaseConnection } from "../db/connection.js";
 import { LcmContextEngine } from "../engine.js";
 import { logStartupBannerOnce } from "../startup-banner-log.js";
 import { createLcmDescribeTool } from "../tools/lcm-describe-tool.js";
@@ -1546,18 +1546,39 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
   };
 }
 
-// Module-level shared init state so that subsequent register() calls
-// (from deferred plugin reloads) can reuse the already-opened DB
-// connection rather than trying to re-open and hitting the lock.
-let sharedInit: {
+// ── Module-level deferred DB state ──────────────────────────────────
+//
+// The database connection is deferred until the gateway_start hook
+// fires.  gateway_start runs AFTER the HTTP server binds its port and
+// stale gateway processes are killed, preventing "database is locked"
+// errors from orphan processes holding a write-lock on lcm.db during
+// macOS launchd KeepAlive restart races.
+//
+// Only the DB *handle* is shared at module scope.  The LcmContextEngine
+// is rebuilt on every register() with fresh deps so that hot-reloaded
+// config changes (threshold, model, ignore patterns) take effect.
+
+let sharedDb: {
   dbPath: string;
   database: DatabaseSync | null;
-  lcm: LcmContextEngine | null;
   initError: Error | null;
   ready: Promise<void>;
   resolveReady: () => void;
   rejectReady: (err: Error) => void;
 } | null = null;
+
+function closeSharedDb(): void {
+  if (sharedDb?.database) {
+    closeLcmConnection(sharedDb.database);
+    sharedDb.database = null;
+  }
+}
+
+/** Reset module state.  Exported for tests only. */
+export function __resetSharedInitForTests(): void {
+  closeSharedDb();
+  sharedDb = null;
+}
 
 const lcmPlugin = {
   id: "lossless-claw",
@@ -1577,104 +1598,119 @@ const lcmPlugin = {
 
   register(api: OpenClawPluginApi) {
     const deps = createLcmDependencies(api);
+    const dbPath = deps.config.databasePath;
 
-    // ── Deferred DB initialization ──────────────────────────────────
-    // The database connection and migrations are deferred until the
-    // gateway_start hook fires.  This hook runs AFTER the HTTP server
-    // binds its port and stale gateway processes have been killed,
-    // which prevents "database is locked" errors caused by orphan
-    // gateway processes holding a write-lock on lcm.db during startup
-    // races (especially on macOS with launchd KeepAlive restarts).
-    //
-    // Because the gateway may re-run register() for deferred plugin
-    // reloads (after gateway_start already fired), we share the init
-    // state at module scope so subsequent register() calls see the
-    // already-initialized database and engine.
+    // ── Ensure DB connection (deferred or immediate) ────────────────
 
-    function logBanner(): void {
-      logStartupBannerOnce({
-        key: "plugin-loaded",
-        log: (message) => console.error(message),
-        message: `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold})`,
-      });
-      logStartupBannerOnce({
-        key: "compaction-model",
-        log: (message) => console.error(message),
-        message: buildCompactionModelLog({
-          config: deps.config,
-          openClawConfig: api.config,
-          defaultProvider: process.env.OPENCLAW_PROVIDER?.trim() ?? "",
-        }),
-      });
+    function initDb(): DatabaseSync {
+      const db = createLcmDatabaseConnection(dbPath);
+      return db;
     }
 
-    if (!sharedInit || sharedInit.dbPath !== deps.config.databasePath) {
-      // First register() call — create a deferred promise.
-      // The gateway_start hook will resolve it.
+    function buildEngine(db: DatabaseSync): LcmContextEngine {
+      return new LcmContextEngine(deps, db);
+    }
+
+    if (!sharedDb || sharedDb.dbPath !== dbPath) {
+      // First register() or dbPath changed — close old handle if any,
+      // defer new connection to gateway_start.
+      closeSharedDb();
+
       let resolveReady!: () => void;
       let rejectReady!: (err: Error) => void;
       const readyPromise = new Promise<void>((res, rej) => {
         resolveReady = res;
         rejectReady = rej;
       });
-      sharedInit = {
-        dbPath: deps.config.databasePath,
+      // Prevent unhandled rejection crash if gateway_start init fails
+      // before any event handler has awaited the promise.
+      readyPromise.catch(() => {});
+
+      sharedDb = {
+        dbPath,
         database: null,
-        lcm: null,
         initError: null,
         ready: readyPromise,
         resolveReady,
         rejectReady,
       };
 
+      const dbState = sharedDb;
       api.on("gateway_start", async () => {
-        const si = sharedInit!;
-        if (si.database) return; // already initialized
+        if (dbState.database || dbState.initError) return;
         try {
-          si.database = createLcmDatabaseConnection(si.dbPath);
-          si.lcm = new LcmContextEngine(deps, si.database);
-          si.resolveReady();
-          logBanner();
+          dbState.database = initDb();
+          dbState.resolveReady();
         } catch (err) {
-          si.initError = err instanceof Error ? err : new Error(String(err));
-          si.rejectReady(si.initError);
+          dbState.initError =
+            err instanceof Error ? err : new Error(String(err));
+          dbState.rejectReady(dbState.initError);
           console.error(
-            `[lcm] Deferred initialization failed: ${si.initError.message}`,
+            `[lcm] Deferred DB init failed: ${dbState.initError.message}`,
           );
         }
       });
-    } else if (!sharedInit.database && !sharedInit.initError) {
-      // Subsequent register() call before gateway_start has fired.
-      // The DB should be safe to open now (port is bound on reloads).
+
+      api.on("gateway_stop", async () => {
+        closeSharedDb();
+        sharedDb = null;
+      });
+    } else if (!sharedDb.database && !sharedDb.initError) {
+      // Subsequent register() before gateway_start fired (deferred
+      // plugin reload).  The port is already bound, so it is safe to
+      // open the DB now.
+      let db: DatabaseSync | null = null;
       try {
-        sharedInit.database = createLcmDatabaseConnection(sharedInit.dbPath);
-        sharedInit.lcm = new LcmContextEngine(deps, sharedInit.database);
-        sharedInit.resolveReady();
-        logBanner();
-      } catch {
-        // Suppress — gateway_start handler will handle it.
+        db = initDb();
+        sharedDb.database = db;
+        sharedDb.resolveReady();
+      } catch (err) {
+        // Clean up partial state
+        if (db) {
+          try { db.close(); } catch { /* ignore cleanup error */ }
+        }
+        sharedDb.initError =
+          err instanceof Error ? err : new Error(String(err));
+        sharedDb.rejectReady(sharedDb.initError);
+        console.error(
+          `[lcm] Eager DB init failed: ${sharedDb.initError.message}`,
+        );
       }
     }
 
-    const init = sharedInit;
+    const dbState = sharedDb;
 
-    function ensureInitialized(): { database: DatabaseSync; lcm: LcmContextEngine } {
-      if (init.initError) {
-        throw new Error(`[lcm] Initialization failed: ${init.initError.message}`);
+    function getDatabase(): DatabaseSync {
+      if (dbState.initError) {
+        throw new Error(
+          `[lcm] Initialization failed: ${dbState.initError.message}`,
+        );
       }
-      if (!init.database || !init.lcm) {
+      if (!dbState.database) {
         throw new Error(
           "[lcm] Plugin not yet initialized — waiting for gateway_start",
         );
       }
-      return { database: init.database, lcm: init.lcm };
+      return dbState.database;
+    }
+
+    // Build engine lazily with current deps so hot-reloaded config
+    // (threshold, model, ignore patterns) always takes effect.
+    let cachedEngine: LcmContextEngine | null = null;
+    let cachedEngineDb: DatabaseSync | null = null;
+    function getEngine(): LcmContextEngine {
+      const db = getDatabase();
+      if (!cachedEngine || cachedEngineDb !== db) {
+        cachedEngine = buildEngine(db);
+        cachedEngineDb = db;
+      }
+      return cachedEngine;
     }
 
     // ── Event handlers ──────────────────────────────────────────────
     api.on("before_reset", async (event, ctx) => {
-      await init.ready;
-      const { lcm: engine } = ensureInitialized();
-      await engine.handleBeforeReset({
+      await dbState.ready;
+      await getEngine().handleBeforeReset({
         reason: event.reason,
         sessionId: ctx.sessionId,
         sessionKey: ctx.sessionKey,
@@ -1684,10 +1720,9 @@ const lcmPlugin = {
       prependSystemContext: LOSSLESS_RECALL_POLICY_PROMPT,
     }));
     api.on("session_end", async (event) => {
-      await init.ready;
-      const { lcm: engine } = ensureInitialized();
+      await dbState.ready;
       const lifecycleEvent = event as SessionEndLifecycleEvent;
-      await engine.handleSessionEnd({
+      await getEngine().handleSessionEnd({
         reason: lifecycleEvent.reason,
         sessionId: lifecycleEvent.sessionId,
         sessionKey: lifecycleEvent.sessionKey,
@@ -1697,35 +1732,35 @@ const lcmPlugin = {
     });
 
     // ── Context engines ─────────────────────────────────────────────
-    api.registerContextEngine("lossless-claw", () => ensureInitialized().lcm);
-    api.registerContextEngine("default", () => ensureInitialized().lcm);
+    api.registerContextEngine("lossless-claw", () => getEngine());
+    api.registerContextEngine("default", () => getEngine());
 
     // ── Tools ───────────────────────────────────────────────────────
     api.registerTool((ctx) =>
       createLcmGrepTool({
         deps,
-        lcm: ensureInitialized().lcm,
+        lcm: getEngine(),
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmDescribeTool({
         deps,
-        lcm: ensureInitialized().lcm,
+        lcm: getEngine(),
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmExpandTool({
         deps,
-        lcm: ensureInitialized().lcm,
+        lcm: getEngine(),
         sessionKey: ctx.sessionKey,
       }),
     );
     api.registerTool((ctx) =>
       createLcmExpandQueryTool({
         deps,
-        lcm: ensureInitialized().lcm,
+        lcm: getEngine(),
         sessionKey: ctx.sessionKey,
         requesterSessionKey: ctx.sessionKey,
       }),
@@ -1734,11 +1769,26 @@ const lcmPlugin = {
     // ── Command ─────────────────────────────────────────────────────
     api.registerCommand(
       createLcmCommand({
-        get db() { return ensureInitialized().database; },
+        get db() { return getDatabase(); },
         config: deps.config,
         deps,
       } as { db: DatabaseSync; config: typeof deps.config; deps: typeof deps }),
     );
+
+    logStartupBannerOnce({
+      key: "plugin-loaded",
+      log: (message) => console.error(message),
+      message: `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold})`,
+    });
+    logStartupBannerOnce({
+      key: "compaction-model",
+      log: (message) => console.error(message),
+      message: buildCompactionModelLog({
+        config: deps.config,
+        openClawConfig: api.config,
+        defaultProvider: process.env.OPENCLAW_PROVIDER?.trim() ?? "",
+      }),
+    });
   },
 };
 
