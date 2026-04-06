@@ -335,11 +335,46 @@ function isMediaAttachmentPart(part: CreateMessagePartInput | { partType: string
 // ── CompactionEngine ─────────────────────────────────────────────────────────
 
 export class CompactionEngine {
+  /**
+   * Per-conversation context items cache, active only during compaction
+   * entry points. null when inactive — external callers (e.g., engine.ts
+   * evaluateLeafTrigger) get uncached reads.
+   */
+  private _contextItemsCache: Map<number, ContextItemRecord[]> | null = null;
+
   constructor(
     private conversationStore: ConversationStore,
     private summaryStore: SummaryStore,
     private config: CompactionConfig,
   ) {}
+
+  /** Read context items, using per-phase cache when active. */
+  private async getContextItemsCached(conversationId: number): Promise<ContextItemRecord[]> {
+    if (this._contextItemsCache) {
+      const cached = this._contextItemsCache.get(conversationId);
+      if (cached) return cached;
+      const items = await this.summaryStore.getContextItems(conversationId);
+      this._contextItemsCache.set(conversationId, items);
+      return items;
+    }
+    return this.summaryStore.getContextItems(conversationId);
+  }
+
+  /** Invalidate cache for a conversation after context mutation. */
+  private invalidateContextCache(conversationId: number): void {
+    this._contextItemsCache?.delete(conversationId);
+  }
+
+  /** Execute with context cache active. Re-entrant safe. */
+  private async withContextCache<T>(fn: () => Promise<T>): Promise<T> {
+    const wasActive = this._contextItemsCache !== null;
+    if (!wasActive) this._contextItemsCache = new Map();
+    try {
+      return await fn();
+    } finally {
+      if (!wasActive) this._contextItemsCache = null;
+    }
+  }
 
   // ── evaluate ─────────────────────────────────────────────────────────────
 
@@ -409,7 +444,7 @@ export class CompactionEngine {
     hardTrigger?: boolean;
     summaryModel?: string;
   }): Promise<CompactionResult> {
-    return this.compactFullSweep(input);
+    return this.withContextCache(() => this.compactFullSweep(input));
   }
 
   /**
@@ -418,6 +453,17 @@ export class CompactionEngine {
    * This is the soft-trigger path used for incremental maintenance.
    */
   async compactLeaf(input: {
+    conversationId: number;
+    tokenBudget: number;
+    summarize: CompactionSummarizeFn;
+    force?: boolean;
+    previousSummaryContent?: string;
+    summaryModel?: string;
+  }): Promise<CompactionResult> {
+    return this.withContextCache(() => this._compactLeafImpl(input));
+  }
+
+  private async _compactLeafImpl(input: {
     conversationId: number;
     tokenBudget: number;
     summarize: CompactionSummarizeFn;
@@ -568,7 +614,7 @@ export class CompactionEngine {
       };
     }
 
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
+    const contextItems = await this.getContextItemsCached(conversationId);
     if (contextItems.length === 0) {
       return {
         actionTaken: false,
@@ -694,6 +740,17 @@ export class CompactionEngine {
 
   /** Compact until under the requested target, running up to maxRounds. */
   async compactUntilUnder(input: {
+    conversationId: number;
+    tokenBudget: number;
+    targetTokens?: number;
+    currentTokens?: number;
+    summarize: CompactionSummarizeFn;
+    summaryModel?: string;
+  }): Promise<{ success: boolean; rounds: number; finalTokens: number; authFailure?: boolean }> {
+    return this.withContextCache(() => this._compactUntilUnderImpl(input));
+  }
+
+  private async _compactUntilUnderImpl(input: {
     conversationId: number;
     tokenBudget: number;
     targetTokens?: number;
@@ -838,7 +895,7 @@ export class CompactionEngine {
 
   /** Sum raw message tokens outside the protected fresh tail. */
   private async countRawTokensOutsideFreshTail(conversationId: number): Promise<number> {
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
+    const contextItems = await this.getContextItemsCached(conversationId);
     const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     let rawTokens = 0;
 
@@ -862,7 +919,7 @@ export class CompactionEngine {
    * at least one message when any compactable message exists.
    */
   private async selectOldestLeafChunk(conversationId: number): Promise<LeafChunkSelection> {
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
+    const contextItems = await this.getContextItemsCached(conversationId);
     const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     const threshold = this.resolveLeafChunkTokens();
 
@@ -927,7 +984,7 @@ export class CompactionEngine {
     }
 
     const startOrdinal = Math.min(...messageItems.map((item) => item.ordinal));
-    const priorSummaryItems = (await this.summaryStore.getContextItems(conversationId))
+    const priorSummaryItems = (await this.getContextItemsCached(conversationId))
       .filter(
         (item) =>
           item.ordinal < startOrdinal &&
@@ -1051,7 +1108,7 @@ export class CompactionEngine {
     hardTrigger: boolean;
   }): Promise<CondensedPhaseCandidate | null> {
     const { conversationId, hardTrigger } = params;
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
+    const contextItems = await this.getContextItemsCached(conversationId);
     const freshTailOrdinal = this.resolveFreshTailOrdinal(contextItems);
     const minChunkTokens = this.resolveCondensedMinChunkTokens();
     const depthLevels = await this.summaryStore.getDistinctDepthsInContext(conversationId, {
@@ -1088,7 +1145,7 @@ export class CompactionEngine {
     targetDepth: number,
     freshTailOrdinalOverride?: number,
   ): Promise<CondensedChunkSelection> {
-    const contextItems = await this.summaryStore.getContextItems(conversationId);
+    const contextItems = await this.getContextItemsCached(conversationId);
     const freshTailOrdinal =
       typeof freshTailOrdinalOverride === "number"
         ? freshTailOrdinalOverride
@@ -1147,7 +1204,7 @@ export class CompactionEngine {
     }
 
     const startOrdinal = Math.min(...summaryItems.map((item) => item.ordinal));
-    const priorSummaryItems = (await this.summaryStore.getContextItems(conversationId))
+    const priorSummaryItems = (await this.getContextItemsCached(conversationId))
       .filter(
         (item) =>
           item.ordinal < startOrdinal &&
@@ -1421,6 +1478,7 @@ export class CompactionEngine {
         summaryId,
       });
     });
+    this.invalidateContextCache(conversationId);
 
     return { summaryId, level: summary.level, content: summary.content };
   }
@@ -1560,6 +1618,7 @@ export class CompactionEngine {
         summaryId,
       });
     });
+    this.invalidateContextCache(conversationId);
 
     return { summaryId, level: condensed.level };
   }
