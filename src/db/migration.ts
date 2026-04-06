@@ -566,7 +566,7 @@ export function runLcmMigrations(
     CREATE INDEX IF NOT EXISTS bootstrap_state_path_idx
       ON conversation_bootstrap_state (session_file_path, updated_at);
 
-    -- Index for cascade delete lookups (added for perf #291)
+    -- Speed up summary_messages lookups by message_id (PK is summary_id,message_id)
     CREATE INDEX IF NOT EXISTS summary_messages_message_idx ON summary_messages (message_id);
   `);
 
@@ -607,7 +607,9 @@ export function runLcmMigrations(
   db.exec(`DROP INDEX IF EXISTS conversations_session_key_idx`);
   ensureSummaryDepthColumn(db);
   // Index depends on depth column — must come after ensureSummaryDepthColumn.
-  db.exec(`CREATE INDEX IF NOT EXISTS summaries_conv_kind_depth_idx ON summaries (conversation_id, kind, depth)`);
+  // Column order: (conversation_id, depth, kind) matches the primary query pattern
+  // in getDistinctDepthsInContext which filters by conversation_id + depth.
+  db.exec(`CREATE INDEX IF NOT EXISTS summaries_conv_depth_kind_idx ON summaries (conversation_id, depth, kind)`);
   ensureSummaryMetadataColumns(db);
   ensureSummaryModelColumn(db);
   backfillSummaryDepths(db);

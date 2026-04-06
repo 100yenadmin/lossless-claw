@@ -76,10 +76,11 @@ function closeDatabase(db: DatabaseSync | undefined): void {
   }
   try {
     // Update query planner statistics for tables that changed since last optimize.
-    db.exec("PRAGMA optimize");
+    // Separate try so a SQLITE_BUSY/SQLITE_READONLY from optimize doesn't skip close.
+    try { db.exec("PRAGMA optimize"); } catch { /* best-effort */ }
     db.close();
   } catch {
-    // Ignore close/optimize failures; callers are shutting down anyway.
+    // Ignore close failures; callers are shutting down anyway.
   } finally {
     untrackConnection(db);
   }
