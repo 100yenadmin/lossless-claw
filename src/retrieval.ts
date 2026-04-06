@@ -245,17 +245,25 @@ export class RetrievalEngine {
       ]);
     }
 
+    // NOTE: sort is applied post-fetch. The store queries use ORDER BY created_at
+    // DESC LIMIT ?, so relevance/hybrid modes re-rank within the top-N-by-recency
+    // window. A truly relevant older result outside the LIMIT window won't appear.
+    // This is a known limitation — fixing it would require passing sort mode into
+    // the SQL layer (ORDER BY rank LIMIT ?), which is a larger change.
     const sortMode = input.sort ?? "recency";
     if (sortMode === "relevance" && mode === "full_text") {
-      // FTS5 rank is negative (lower = better match). Sort ascending.
+      // FTS5 rank is negative (more negative = better match). Sort ascending.
       messages.sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
       summaries.sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
     } else if (sortMode === "hybrid" && mode === "full_text") {
-      // Blend relevance with recency: rank (lower=better) adjusted by time
+      // Blend relevance with recency. FTS5 rank is negative (lower = better),
+      // so we negate it to get a positive relevance score, then penalize age.
       const now = Date.now();
       const score = (item: { rank?: number; createdAt: Date }) => {
+        const relevance = -(item.rank ?? 0); // higher = more relevant
         const ageHours = (now - item.createdAt.getTime()) / 3_600_000;
-        return (item.rank ?? 0) * (1 + ageHours * 0.001);
+        const agePenalty = 1 + ageHours * 0.001; // older items penalized
+        return -(relevance / agePenalty); // negate so sort ascending = best first
       };
       messages.sort((a, b) => score(a) - score(b));
       summaries.sort((a, b) => score(a) - score(b));
