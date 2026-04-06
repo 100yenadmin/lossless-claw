@@ -565,6 +565,10 @@ export function runLcmMigrations(
     CREATE INDEX IF NOT EXISTS large_files_conv_idx ON large_files (conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS bootstrap_state_path_idx
       ON conversation_bootstrap_state (session_file_path, updated_at);
+
+    -- Indexes for cascade deletes and condensation queries (added for perf #291)
+    CREATE INDEX IF NOT EXISTS summary_messages_message_idx ON summary_messages (message_id);
+    CREATE INDEX IF NOT EXISTS summaries_conv_kind_depth_idx ON summaries (conversation_id, kind, depth);
   `);
 
   // Forward-compatible conversations migration for existing DBs.

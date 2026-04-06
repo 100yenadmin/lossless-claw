@@ -32,6 +32,15 @@ function configureConnection(db: DatabaseSync): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
   db.exec("PRAGMA foreign_keys = ON");
+  // 64MB page cache (default 2MB is severely undersized for multi-GB databases
+  // with concurrent agents). Memory is demand-allocated, released on close.
+  db.exec("PRAGMA cache_size = -65536");
+  // NORMAL is officially recommended for WAL mode — crash-safe for app crashes,
+  // only risks data loss on power failure (OS/kernel crash). The bootstrap
+  // process re-ingests any lost transactions from session files.
+  db.exec("PRAGMA synchronous = NORMAL");
+  // Keep temp tables/indexes in RAM (helps ordinal resequencing).
+  db.exec("PRAGMA temp_store = MEMORY");
   return db;
 }
 
@@ -66,9 +75,11 @@ function closeDatabase(db: DatabaseSync | undefined): void {
     return;
   }
   try {
+    // Update query planner statistics for tables that changed since last optimize.
+    db.exec("PRAGMA optimize");
     db.close();
   } catch {
-    // Ignore close failures; callers are shutting down anyway.
+    // Ignore close/optimize failures; callers are shutting down anyway.
   } finally {
     untrackConnection(db);
   }
