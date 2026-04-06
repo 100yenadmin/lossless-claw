@@ -6,6 +6,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import lcmPlugin from "../index.js";
 import * as connectionModule from "../src/db/connection.js";
 import { closeLcmConnection } from "../src/db/connection.js";
+import { clearAllSharedInit } from "../src/plugin/shared-init.js";
 import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
 
 type RegisteredEngineFactory = (() => unknown) | undefined;
@@ -143,6 +144,7 @@ describe("lcm plugin registration", () => {
       closeLcmConnection(dbPath);
     }
     dbPaths.clear();
+    clearAllSharedInit();
     resetStartupBannerLogsForTests();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
