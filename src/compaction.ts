@@ -407,6 +407,7 @@ export class CompactionEngine {
     conversationId: number,
     tokenBudget?: number,
     liveContextTokens?: number,
+    precomputedTokenCount?: number,
   ): Promise<LeafTriggerResult> {
     const rawTokensOutsideTail = await this.countRawTokensOutsideFreshTail(conversationId);
     const threshold = this.resolveLeafChunkTokens();
@@ -415,10 +416,12 @@ export class CompactionEngine {
       return { shouldCompact: false, rawTokensOutsideTail, threshold };
     }
 
-    // Use the higher of stored token count and live context estimate
-    // for more accurate headroom decisions.  The stored count can lag
-    // behind the actual assembled context after rapid ingestion.
-    const storedTokens = await this.summaryStore.getContextTokenCount(conversationId);
+    // Reuse a precomputed token count when the caller already fetched it
+    // (avoids a duplicate getContextTokenCount DB read — important on
+    // large databases with concurrent agent sessions).
+    // Use the higher of stored/precomputed count and live context estimate
+    // for more accurate headroom decisions.
+    const storedTokens = precomputedTokenCount ?? await this.summaryStore.getContextTokenCount(conversationId);
     const totalAssembledTokens =
       typeof liveContextTokens === "number" && liveContextTokens > storedTokens
         ? liveContextTokens
@@ -522,7 +525,7 @@ export class CompactionEngine {
 
     const tokensBefore = await this.summaryStore.getContextTokenCount(conversationId);
     const threshold = Math.floor(this.config.contextThreshold * tokenBudget);
-    const leafTrigger = await this.evaluateLeafTrigger(conversationId, tokenBudget);
+    const leafTrigger = await this.evaluateLeafTrigger(conversationId, tokenBudget, undefined, tokensBefore);
 
     if (!force && tokensBefore <= threshold && !leafTrigger.shouldCompact) {
       return {
@@ -650,7 +653,7 @@ export class CompactionEngine {
 
     const tokensBefore = await this.summaryStore.getContextTokenCount(conversationId);
     const threshold = Math.floor(this.config.contextThreshold * tokenBudget);
-    const leafTrigger = await this.evaluateLeafTrigger(conversationId, tokenBudget);
+    const leafTrigger = await this.evaluateLeafTrigger(conversationId, tokenBudget, undefined, tokensBefore);
 
     if (!force && tokensBefore <= threshold && !leafTrigger.shouldCompact) {
       return {
