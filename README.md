@@ -159,7 +159,7 @@ Add a `lossless-claw` entry under `plugins.entries` in your OpenClaw config:
 | `LCM_PRUNE_HEARTBEAT_OK` | `false` | Retroactively delete `HEARTBEAT_OK` turn cycles from LCM storage |
 | `LCM_LEAF_SKIP_REDUCTION_THRESHOLD` | `0.05` | Minimum estimated reduction (fraction of assembled tokens) to justify leaf compaction; set to 0 to disable cache-aware skip |
 | `LCM_LEAF_BUDGET_HEADROOM_FACTOR` | `0.8` | Skip leaf compaction when assembled tokens are below this fraction of the budget ceiling; set to 0 to disable headroom check |
-| `LCM_FALLBACK_PROVIDERS` | `""` | Comma-separated `provider:model` pairs for compaction summarization fallbacks |
+| `LCM_FALLBACK_PROVIDERS` | `""` | Comma-separated `provider/model` pairs for compaction summarization fallbacks (e.g. `anthropic/claude-haiku-4-5,openai/gpt-4o-mini`) |
 
 ### Expansion model override requirements
 
