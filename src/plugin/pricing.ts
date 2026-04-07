@@ -22,7 +22,7 @@ const MODEL_PRICING: Array<[prefix: string, pricing: ModelPricing]> = [
   ["gemini-2.5-flash", { input: 0.30, output: 2.50 }],
   ["gemini-2.5-pro", { input: 1.25, output: 10.00 }],
   // Others
-  ["mistral-small", { input: 0.20, output: 0.60 }],
+  ["mistral-small", { input: 0.20, output: 0.60 }], // matches mistral-small-4 via prefix
   ["deepseek-v3", { input: 0.28, output: 0.42 }],
 ];
 

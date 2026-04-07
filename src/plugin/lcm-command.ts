@@ -478,24 +478,29 @@ function getCompactionHealthStats(db: DatabaseSync, conversationId: number): {
       .prepare(
         `SELECT created_at, pass FROM compaction_events
          WHERE conversation_id = ?
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC, event_id DESC LIMIT 1`,
       )
       .get(conversationId) as { created_at: string; pass: string } | undefined;
 
-    const counts = db
+    const lastHour = db
       .prepare(
-        `SELECT
-           SUM(CASE WHEN created_at > datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS last_hour,
-           SUM(CASE WHEN created_at > datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS last_24h
-         FROM compaction_events WHERE conversation_id = ?`,
+        `SELECT COUNT(*) AS cnt FROM compaction_events
+         WHERE conversation_id = ? AND created_at > datetime('now', '-1 hour')`,
       )
-      .get(conversationId) as { last_hour: number; last_24h: number } | undefined;
+      .get(conversationId) as { cnt: number } | undefined;
+
+    const last24h = db
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM compaction_events
+         WHERE conversation_id = ? AND created_at > datetime('now', '-24 hours')`,
+      )
+      .get(conversationId) as { cnt: number } | undefined;
 
     return {
       lastCompactionAt: last?.created_at ?? null,
       lastCompactionPass: last?.pass ?? null,
-      passesLastHour: counts?.last_hour ?? 0,
-      passesLast24h: counts?.last_24h ?? 0,
+      passesLastHour: lastHour?.cnt ?? 0,
+      passesLast24h: last24h?.cnt ?? 0,
     };
   } catch {
     return { lastCompactionAt: null, lastCompactionPass: null, passesLastHour: 0, passesLast24h: 0 };
@@ -779,15 +784,25 @@ async function buildEfficiencyText(params: {
   db: DatabaseSync;
 }): Promise<string> {
   const current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
-  const convId = current.kind === "resolved" ? current.stats.conversationId : undefined;
-  const stats = getCompactionEfficiencyStats(params.db, convId);
+  if (current.kind === "unavailable") {
+    return [
+      ...buildHeaderLines(),
+      "",
+      buildSection("\u26A1 Compaction efficiency", [
+        buildStatLine("status", "Current conversation unavailable."),
+        buildStatLine("reason", current.reason),
+      ]),
+    ].join("\n");
+  }
+
+  const stats = getCompactionEfficiencyStats(params.db, current.stats.conversationId);
 
   if (stats.totalPasses === 0) {
     return [
       ...buildHeaderLines(),
       "",
       buildSection("\u26A1 Compaction efficiency", [
-        buildStatLine("status", "No compaction events recorded yet."),
+        buildStatLine("status", "No compaction events recorded for this conversation."),
         buildStatLine("tip", "Run a session with 10+ turns to generate compaction data."),
       ]),
     ].join("\n");
