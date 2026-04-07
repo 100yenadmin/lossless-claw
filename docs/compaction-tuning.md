@@ -253,7 +253,7 @@ Compaction calls the LLM to summarize message chunks. Each call:
 |-------|-------------|--------------|-----------|---------|---------|-------|
 | GPT-4.1-nano (`gpt-4.1-nano`) | $0.10 | $0.40 | **$0.003** | 1M | 0.3-1s | Cheapest option available |
 | GPT-4o-mini (`gpt-4o-mini`) | $0.15 | $0.60 | **$0.004** | 128K | 0.5-1.5s | Auto caching (50% off) |
-| Mistral Small (`mistral-small`) | $0.20 | $0.60 | **$0.005** | 256K | 0.5-1.5s | Good context headroom |
+| Mistral Small (`mistral-small-4`) | $0.20 | $0.60 | **$0.005** | 256K | 0.5-1.5s | Good context headroom |
 | GPT-4.1-mini (`gpt-4.1-mini`) | $0.20 | $0.80 | **$0.006** | 1M | 0.5-1.5s | 1M context, 75% cache discount |
 | DeepSeek V3 (`deepseek-v3`) | $0.28 | $0.42 | **$0.007** | 164K | 1-2s | 90% auto cache, cheapest cached |
 | Gemini 2.5 Flash (`gemini-2.5-flash`) | $0.30 | $2.50 | **$0.012** | 1M | 0.3-1s | Fastest TTFT, 90% cache discount |
