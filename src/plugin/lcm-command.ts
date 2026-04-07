@@ -671,7 +671,12 @@ async function buildStatusText(params: {
       const savings = estimateSavings(effStats.totalTokensSaved);
       const net = savings - compactionCost;
       const effPct = savings > 0 ? Math.round((net / savings) * 100) : 0;
-      const topModel = effStats.modelBreakdown[0]?.model ?? "unknown";
+      // Pick the model with highest total cost as the top model (cost driver),
+      // not just the one with most passes.
+      const costRanked = effStats.modelBreakdown
+        .map((m) => ({ ...m, cost: estimateModelCost(m.model, m.inputTokens, m.outputTokens).totalCost }))
+        .sort((a, b) => b.cost - a.cost);
+      const topModel = costRanked[0]?.model ?? "unknown";
       const modelLabel = effStats.modelBreakdown.length > 1
         ? `${topModel} +${effStats.modelBreakdown.length - 1} more`
         : topModel;
