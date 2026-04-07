@@ -474,9 +474,13 @@ export class CompactionEngine {
     // Use the higher of stored/precomputed count and live context estimate
     // for more accurate headroom decisions.
     const storedTokens = precomputedTokenCount ?? await this.summaryStore.getContextTokenCount(conversationId);
+    const normalizedLiveContextTokens =
+      Number.isFinite(liveContextTokens) && (liveContextTokens as number) > 0
+        ? Math.floor(liveContextTokens as number)
+        : undefined;
     const totalAssembledTokens =
-      typeof liveContextTokens === "number" && liveContextTokens > storedTokens
-        ? liveContextTokens
+      normalizedLiveContextTokens !== undefined && normalizedLiveContextTokens > storedTokens
+        ? normalizedLiveContextTokens
         : storedTokens;
 
     // ── Budget headroom check (evaluated first) ───────────────────
