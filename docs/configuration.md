@@ -22,10 +22,10 @@ openclaw plugins install --link /path/to/lossless-claw
 
 `openclaw plugins install` handles plugin registration/enabling and slot selection automatically.
 
-Set recommended environment variables:
+Set recommended environment variables (these override the defaults for coding sessions):
 
 ```bash
-export LCM_FRESH_TAIL_COUNT=32
+export LCM_FRESH_TAIL_COUNT=32    # default is 64; 32 is better for tool-heavy coding
 export LCM_NEW_SESSION_RETAIN_DEPTH=2
 export LCM_INCREMENTAL_MAX_DEPTH=-1
 ```

@@ -8,7 +8,7 @@ Lossless Claw compresses your conversation history into summaries so long sessio
 
 **Three things to configure:**
 
-1. **Compaction model** — Use a fast, cheap model. Never use your main model.
+1. **Compaction model** — Use a fast, cheap model. Avoid using your main model when it's expensive or slow.
 2. **Skip thresholds** — Prevent unnecessary compaction that wastes your prompt cache.
 3. **Chunk size** — How much context to compress per pass.
 
