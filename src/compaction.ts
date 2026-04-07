@@ -1644,7 +1644,9 @@ export class CompactionEngine {
       content: summary.content,
       removedTokens,
       addedTokens: tokenCount,
-      modelInputTokensEst: estimateTokens(concatenated),
+      modelInputTokensEst: estimateTokens(concatenated)
+        + estimateTokens(previousSummaryContent ?? "")
+        + 500, // prompt wrapper overhead (instructions, XML tags)
       modelOutputTokensEst: tokenCount,
     };
   }
@@ -1795,7 +1797,9 @@ export class CompactionEngine {
       level: condensed.level,
       removedTokens,
       addedTokens: tokenCount,
-      modelInputTokensEst: estimateTokens(concatenated),
+      modelInputTokensEst: estimateTokens(concatenated)
+        + estimateTokens(previousSummaryContent ?? "")
+        + 500, // prompt wrapper overhead
       modelOutputTokensEst: tokenCount,
     };
   }

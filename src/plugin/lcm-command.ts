@@ -452,7 +452,7 @@ function formatTimeAgo(isoDate: string | null): string {
   // Normalize to ISO 8601: replace space with T, append Z only if no timezone.
   const trimmed = isoDate.trim();
   const normalized = trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T");
-  const hasTimezone = /Z|[+-]\d{2}:\d{2}$/.test(normalized);
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(normalized);
   const then = new Date(hasTimezone ? normalized : normalized + "Z");
   if (Number.isNaN(then.getTime())) return "unknown";
   const now = Date.now();
