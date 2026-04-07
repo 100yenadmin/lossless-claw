@@ -2,9 +2,9 @@
 
 ## TLDR — Quick Setup
 
-Lossless Claw compresses your conversation history into summaries so long sessions don't blow the context window or your API bill. On a 200-turn Opus session, proper tuning can cut input token costs by 40-60%.
+Lossless Claw compresses your conversation history into summaries so long sessions don't blow the context window or your API bill. Research shows 20-39% average token reduction for mixed tool-use sessions, with up to 86% for tool-heavy sessions ([arXiv:2602.22402](https://arxiv.org/abs/2602.22402)).
 
-> **Example:** A 200-turn Opus coding session costs ~$4 in input tokens without compaction tuning. With the recommended Opus config below and Haiku as the compaction model, effective cost drops to ~$1.80 (compaction overhead: ~$0.40). **Net savings: ~$1.80/session (45%).**
+> **Key insight:** The savings come from two places: (1) compaction reduces the tokens sent each turn, and (2) proper tuning avoids unnecessary compaction that would invalidate your prompt cache. On Opus, a single unnecessary cache miss on 150K of cached context costs ~$0.68 — often more than the tokens the compaction would have saved.
 
 **Three things to configure:**
 
@@ -226,7 +226,9 @@ This is why compaction model choice matters so much — a slow model turns full 
 
 > **Note:** Cached input is always 1/10 of the base input price across all Anthropic models. Cache TTL is 5 minutes (refreshed on each hit).
 
-**Break-even formula:** A compaction saving X tokens/turn that invalidates Y cached tokens takes `(Y x miss_penalty) / (X x input_price)` turns to pay back. For typical values (150K cached, 10K saved): **~13.5 turns** regardless of model tier.
+**Break-even formula:** A compaction saving X tokens/turn that invalidates Y cached tokens takes `(Y × miss_penalty) / (X × input_price)` turns to pay back. For typical values (150K cached, 10K saved): **~13.5 turns** regardless of model tier (since cache reads are always 1/10 of base input across all Anthropic models, the input price cancels out).
+
+> **Note:** This formula omits the cache write premium (1.25× base input for 5-minute TTL). Including it adds ~0.7 turns to the break-even for typical compaction sizes. Anthropic also offers a 1-hour TTL at 2× write cost. See [prompt caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) for details.
 
 ### Escape hatches
 
@@ -249,16 +251,16 @@ Compaction calls the LLM to summarize message chunks. Each call:
 
 | Model | Input $/MTok | Output $/MTok | Cost/call | Context | Latency | Notes |
 |-------|-------------|--------------|-----------|---------|---------|-------|
-| GPT-4o-mini | $0.15 | $0.60 | **$0.004** | 128K | 0.5-1.5s | Cheapest, auto caching (50% off) |
-| Gemini 2.5 Flash | $0.30 | $2.50 | **$0.012** | 1M | 0.3-1s | Fastest TTFT, 90% cache discount |
-| Mistral Small 4 | $0.15 | $0.60 | **$0.004** | 256K | 0.5-1.5s | Good context headroom |
-| DeepSeek V3 | $0.28 | $0.42 | **$0.007** | 164K | 1-2s | 90% auto cache, cheapest cached |
-| GPT-4.1-mini | $0.40 | $1.60 | **$0.012** | 1M | 0.5-1.5s | 1M context, 75% cache discount |
-| MiniMax-Text-01 | $0.20 | $1.10 | **$0.007** | 4M | ~1s | Largest context window |
-| Haiku 4.5 | $1.00 | $5.00 | **$0.032** | 200K | 0.3-0.8s | Best Anthropic option |
-| GPT-5.4-mini | $0.75 | $4.50 | **$0.026** | 400K | 0.5-1s | 90% cache, 128K max output |
-| Sonnet 4.6 | $3.00 | $15.00 | **$0.096** | 1M | 1-3s | Higher quality, expensive |
-| **Opus 4.6** | **$5.00** | **$25.00** | **$0.160** | **1M** | **3-8s** | **Never use for compaction** |
+| GPT-4.1-nano (`gpt-4.1-nano`) | $0.10 | $0.40 | **$0.003** | 1M | 0.3-1s | Cheapest option available |
+| GPT-4o-mini (`gpt-4o-mini`) | $0.15 | $0.60 | **$0.004** | 128K | 0.5-1.5s | Auto caching (50% off) |
+| Mistral Small (`mistral-small`) | $0.20 | $0.60 | **$0.005** | 256K | 0.5-1.5s | Good context headroom |
+| GPT-4.1-mini (`gpt-4.1-mini`) | $0.20 | $0.80 | **$0.006** | 1M | 0.5-1.5s | 1M context, 75% cache discount |
+| DeepSeek V3 (`deepseek-v3`) | $0.28 | $0.42 | **$0.007** | 164K | 1-2s | 90% auto cache, cheapest cached |
+| Gemini 2.5 Flash (`gemini-2.5-flash`) | $0.30 | $2.50 | **$0.012** | 1M | 0.3-1s | Fastest TTFT, 90% cache discount |
+| Haiku 4.5 (`claude-haiku-4-5`) | $1.00 | $5.00 | **$0.032** | 200K | 0.3-0.8s | Best Anthropic option |
+| GPT-5.4-mini (`gpt-5.4-mini`) | $0.75 | $4.50 | **$0.026** | 400K | 0.5-1s | 90% cache, 128K max output |
+| Sonnet 4.6 (`claude-sonnet-4-6`) | $3.00 | $15.00 | **$0.096** | 1M | 1-3s | Higher quality, expensive |
+| **Opus 4.6** (`claude-opus-4-6`) | **$5.00** | **$25.00** | **$0.160** | **1M** | **3-8s** | **Never use for compaction** |
 
 > **Context window note:** The compaction model only receives the chunk being compressed (~20-35K tokens + ~5K overhead), NOT the full conversation. A 128K model works fine for default settings. Set `leafChunkTokens` below your compaction model's context window minus 7K (for overhead + output).
 
