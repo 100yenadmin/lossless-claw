@@ -678,9 +678,9 @@ async function buildStatusText(params: {
 
       // Memory quality metrics
       const totalSummaries = current.stats.summaryCount;
-      const doctorIssues = conversationDoctor.total;
+      const lossyIssues = conversationDoctor.truncated + conversationDoctor.fallback;
       const losslessPct = totalSummaries > 0
-        ? Math.round(((totalSummaries - doctorIssues) / totalSummaries) * 100)
+        ? Math.round(((totalSummaries - lossyIssues) / totalSummaries) * 100)
         : 100;
       const compressionRatio = current.stats.compressedTokenCount > 0
         ? current.stats.contextTokenCount / current.stats.compressedTokenCount
@@ -700,7 +700,7 @@ async function buildStatusText(params: {
           buildStatLine("estimated savings", `~${formatCurrency(savings)}`),
           buildStatLine("net efficiency", `${net >= 0 ? "+" : ""}${formatCurrency(net)} (${effPct}% efficient)`),
           buildStatLine("summary quality", totalSummaries > 0
-            ? `${losslessPct}% lossless (${doctorIssues > 0 ? `${doctorIssues} fallback/truncated` : "all clean"} of ${totalSummaries})`
+            ? `${losslessPct}% lossless (${lossyIssues > 0 ? `${lossyIssues} fallback/truncated` : "all clean"} of ${totalSummaries})`
             : "no summaries yet"),
           buildStatLine("compression health", compressionHealth),
           buildStatLine("recommendation", net >= 0 ? `\u2713 ${recommendation}` : `\u26A0 ${recommendation}`),
