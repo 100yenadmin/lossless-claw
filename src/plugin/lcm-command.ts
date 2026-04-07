@@ -448,7 +448,10 @@ function buildHelpText(error?: string): string {
 
 function formatTimeAgo(isoDate: string | null): string {
   if (!isoDate) return "unknown";
-  const then = new Date(isoDate + "Z"); // SQLite datetime() is UTC
+  // SQLite datetime() returns "YYYY-MM-DD HH:MM:SS" (space-separated, UTC).
+  // Normalize to ISO 8601 by replacing space with T before appending Z.
+  const normalized = isoDate.includes("T") ? isoDate : isoDate.replace(" ", "T");
+  const then = new Date(normalized.endsWith("Z") ? normalized : normalized + "Z");
   const now = Date.now();
   const diffMs = now - then.getTime();
   if (diffMs < 0) return "just now";
@@ -610,9 +613,6 @@ async function buildStatusText(params: {
     );
 
     // Fresh tail
-    const unsummarizedCount = Math.max(0, current.stats.messageCount - (current.stats.summaryCount > 0
-      ? current.stats.messageCount - freshTailConfig
-      : 0));
     const freshTailHealthy = current.stats.messageCount <= freshTailConfig || current.stats.summaryCount > 0;
     healthLines.push(
       buildStatLine(
@@ -726,7 +726,7 @@ function getCompactionEfficiencyStats(db: DatabaseSync, conversationId?: number)
            COUNT(*) AS total_passes,
            SUM(CASE WHEN pass = 'leaf' THEN 1 ELSE 0 END) AS leaf_passes,
            SUM(CASE WHEN pass = 'condensed' THEN 1 ELSE 0 END) AS condensed_passes,
-           SUM(tokens_before - tokens_after) AS total_tokens_saved
+           SUM(CASE WHEN tokens_before > tokens_after THEN tokens_before - tokens_after ELSE 0 END) AS total_tokens_saved
          FROM compaction_events ${whereClause}`,
       )
       .get(...params) as {
@@ -827,11 +827,15 @@ async function buildEfficiencyText(params: {
   const recommendations: string[] = [];
   for (const m of stats.modelBreakdown) {
     const lower = m.model.toLowerCase();
+    const avgCost = m.passes > 0
+      ? estimateModelCost(m.model, m.inputTokens / m.passes, m.outputTokens / m.passes).totalCost
+      : 0;
+    const avgLabel = formatCurrency(avgCost);
     if (lower.includes("opus")) {
-      recommendations.push(`\u26A0 Using ${m.model} (~$0.16/call). Fix: set "summaryModel": "claude-haiku-4-5" or export LCM_SUMMARY_MODEL=claude-haiku-4-5`);
+      recommendations.push(`\u26A0 Using ${m.model} (~${avgLabel}/call). Fix: set "summaryModel": "claude-haiku-4-5" or export LCM_SUMMARY_MODEL=claude-haiku-4-5`);
     }
     if (lower.includes("sonnet") && stats.totalPasses > 5) {
-      recommendations.push(`\uD83D\uDCA1 Using ${m.model}. Haiku is 3x cheaper: set "summaryModel": "claude-haiku-4-5"`);
+      recommendations.push(`\uD83D\uDCA1 Using ${m.model} (~${avgLabel}/call). Haiku is 3x cheaper: set "summaryModel": "claude-haiku-4-5"`);
     }
   }
   if (net < 0) {
