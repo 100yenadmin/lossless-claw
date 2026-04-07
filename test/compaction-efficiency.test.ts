@@ -71,6 +71,15 @@ describe("formatCurrency", () => {
   it("formats near-zero as $0.00", () => {
     expect(formatCurrency(0.001)).toBe("$0.00");
   });
+
+  it("formats negative amounts with sign before dollar", () => {
+    expect(formatCurrency(-4.35)).toBe("-$4.35");
+    expect(formatCurrency(-0.12)).toBe("-$0.12");
+  });
+
+  it("formats near-zero negative as $0.00", () => {
+    expect(formatCurrency(-0.001)).toBe("$0.00");
+  });
 });
 
 describe("efficiency scoring", () => {

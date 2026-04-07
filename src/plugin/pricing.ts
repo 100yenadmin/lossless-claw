@@ -65,5 +65,6 @@ export function estimateSavings(
 
 export function formatCurrency(amount: number): string {
   if (Math.abs(amount) < 0.005) return "$0.00";
+  if (amount < 0) return `-$${Math.abs(amount).toFixed(2)}`;
   return `$${amount.toFixed(2)}`;
 }
