@@ -484,6 +484,9 @@ export class CompactionEngine {
     // avoid unnecessary cache prefix churn.
     const rawHeadroomFactor = this.config.leafBudgetHeadroomFactor ?? 0.8;
     const headroomFactor = Math.min(Math.max(rawHeadroomFactor, 0), 1.0);
+    // headroomEnabled: only run the headroom check when factor > 0 and
+    // tokenBudget is available.  Setting factor to 0 disables the check
+    // (and does NOT create false budget pressure).
     const headroomEnabled = headroomFactor > 0 && typeof tokenBudget === "number" && tokenBudget > 0;
     const budgetCeiling = headroomEnabled
       ? Math.floor(headroomFactor * this.config.contextThreshold * tokenBudget)
@@ -506,8 +509,14 @@ export class CompactionEngine {
     // If the estimated token reduction is tiny relative to the total
     // assembled context, the prompt-cache prefix invalidation cost
     // exceeds the compression benefit.
-    // Budget pressure override: when headroom is enabled and context
-    // reaches or exceeds the ceiling, compaction fires unconditionally.
+    //
+    // This skip is gated on !budgetPressure.  Budget pressure is true
+    // only when headroom is enabled (factor > 0, tokenBudget provided)
+    // AND assembled tokens reach or exceed the headroom ceiling.  When the
+    // headroom check is disabled or tokenBudget is missing, there is
+    // no budget pressure signal, so the cache-aware skip can fire.
+    // When budget pressure IS detected, compaction fires unconditionally
+    // to prevent starvation in large contexts.
     const perPassRawTokens = Math.min(rawTokensOutsideTail, threshold);
     const estimatedReduction = perPassRawTokens - this.config.leafTargetTokens;
     const reductionThreshold = Math.min(Math.max(this.config.leafSkipReductionThreshold ?? 0.05, 0), 1.0);
