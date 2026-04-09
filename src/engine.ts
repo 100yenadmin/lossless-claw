@@ -1235,13 +1235,11 @@ export class LcmContextEngine implements ContextEngine {
     this.statelessSessionPatterns = compileSessionPatterns(this.config.statelessSessionPatterns);
     this.db = database;
 
-    this.fts5Available = getLcmDbFeatures(this.db).fts5Available;
-
     // Run migrations eagerly at construction time so the schema exists
     // before any lifecycle hook fires.
     let migrationOk = false;
     try {
-      runLcmMigrations(this.db, { fts5Available: this.fts5Available });
+      runLcmMigrations(this.db);
       this.migrated = true;
 
       // Verify tables were actually created
@@ -1263,6 +1261,8 @@ export class LcmContextEngine implements ContextEngine {
         `[lcm] Migration failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+
+    this.fts5Available = getLcmDbFeatures(this.db).fts5Available;
 
     // Only claim ownership of compaction when the DB is operational.
     // Without a working schema, ownsCompaction would disable the runtime's
@@ -1428,7 +1428,7 @@ export class LcmContextEngine implements ContextEngine {
     if (this.migrated) {
       return;
     }
-    runLcmMigrations(this.db, { fts5Available: this.fts5Available });
+    runLcmMigrations(this.db);
     this.migrated = true;
   }
 

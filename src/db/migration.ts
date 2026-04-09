@@ -27,6 +27,18 @@ type SummaryParentEdgeRow = {
   parent_summary_id: string;
 };
 
+type TableNameRow = {
+  name?: string;
+};
+
+type FtsTableSpec = {
+  tableName: string;
+  createSql: string;
+  seedSql: string;
+  expectedColumns: string[];
+  staleSchemaPatterns?: string[];
+};
+
 function ensureSummaryDepthColumn(db: DatabaseSync): void {
   const summaryColumns = db.prepare(`PRAGMA table_info(summaries)`).all() as SummaryColumnInfo[];
   const hasDepth = summaryColumns.some((col) => col.name === "depth");
@@ -444,6 +456,72 @@ function backfillToolCallColumns(db: DatabaseSync): void {
   );
 }
 
+function getExistingTableNames(db: DatabaseSync, names: string[]): Set<string> {
+  if (names.length === 0) {
+    return new Set();
+  }
+  const placeholders = names.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
+    .all(...names) as TableNameRow[];
+  return new Set(
+    rows
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string" && name.length > 0),
+  );
+}
+
+function getFtsShadowTableNames(tableName: string): string[] {
+  return [
+    `${tableName}_data`,
+    `${tableName}_idx`,
+    `${tableName}_content`,
+    `${tableName}_docsize`,
+    `${tableName}_config`,
+  ];
+}
+
+function shouldRecreateStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec): boolean {
+  const shadowTables = getFtsShadowTableNames(spec.tableName);
+  const existingTables = getExistingTableNames(db, [spec.tableName, ...shadowTables]);
+  if (!existingTables.has(spec.tableName)) {
+    return true;
+  }
+  if (shadowTables.some((name) => !existingTables.has(name))) {
+    return true;
+  }
+
+  try {
+    const info = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?")
+      .get(spec.tableName) as { sql?: string } | undefined;
+    const sql = info?.sql ?? "";
+    if (spec.staleSchemaPatterns?.some((pattern) => sql.includes(pattern))) {
+      return true;
+    }
+
+    const columns = db.prepare(`PRAGMA table_info(${spec.tableName})`).all() as SummaryColumnInfo[];
+    const columnNames = new Set(
+      columns
+        .map((col) => col.name)
+        .filter((name): name is string => typeof name === "string" && name.length > 0),
+    );
+    return spec.expectedColumns.some((column) => !columnNames.has(column));
+  } catch {
+    return true;
+  }
+}
+
+function ensureStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec): void {
+  if (!shouldRecreateStandaloneFtsTable(db, spec)) {
+    return;
+  }
+
+  db.exec(`DROP TABLE IF EXISTS ${spec.tableName}`);
+  db.exec(spec.createSql);
+  db.exec(spec.seedSql);
+}
+
 export function runLcmMigrations(
   db: DatabaseSync,
   options?: { fts5Available?: boolean },
@@ -656,76 +734,56 @@ export function runLcmMigrations(
   backfillSummaryMetadata(db);
   backfillToolCallColumns(db);
 
-  const fts5Available = options?.fts5Available ?? getLcmDbFeatures(db).fts5Available;
+  const detectedFeatures = options?.fts5Available === false ? null : getLcmDbFeatures(db);
+  const fts5Available = options?.fts5Available ?? detectedFeatures?.fts5Available ?? false;
   if (!fts5Available) {
     return;
   }
 
-  // FTS5 virtual tables for full-text search (cannot use IF NOT EXISTS, so check manually)
-  const hasFts = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'")
-    .get();
-
-  if (hasFts) {
-    // Check for stale schema: external-content FTS tables with content_rowid cause errors.
-    // Drop and recreate as standalone FTS if the old schema is detected.
-    const ftsSchema = (
-      db
-        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'")
-        .get() as { sql: string } | undefined
-    )?.sql;
-    if (ftsSchema && ftsSchema.includes("content_rowid")) {
-      db.exec("DROP TABLE messages_fts");
-      db.exec(`
-        CREATE VIRTUAL TABLE messages_fts USING fts5(
-          content,
-          tokenize='porter unicode61'
-        );
-        INSERT INTO messages_fts(rowid, content) SELECT message_id, content FROM messages;
-      `);
+  const trigramTokenizerAvailable = detectedFeatures?.trigramTokenizerAvailable ?? false;
+  if (!trigramTokenizerAvailable) {
+    try {
+      db.exec(`DROP TABLE IF EXISTS summaries_fts_cjk`);
+    } catch {
+      // Best effort only. A stale virtual table should not block core migration.
     }
-  } else {
-    db.exec(`
+  }
+
+  ensureStandaloneFtsTable(db, {
+    tableName: "messages_fts",
+    createSql: `
       CREATE VIRTUAL TABLE messages_fts USING fts5(
         content,
         tokenize='porter unicode61'
-      );
-    `);
-  }
+      )
+    `,
+    seedSql: `
+      INSERT INTO messages_fts(rowid, content)
+      SELECT message_id, content FROM messages
+    `,
+    expectedColumns: ["content"],
+    staleSchemaPatterns: ["content_rowid"],
+  });
 
-  const summariesFtsInfo = db
-    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='summaries_fts'")
-    .get() as { sql?: string } | undefined;
-  const summariesFtsSql = summariesFtsInfo?.sql ?? "";
-  let summariesFtsColumns: Array<{ name?: string }> | null = null;
-  try {
-    summariesFtsColumns = db.prepare(`PRAGMA table_info(summaries_fts)`).all() as Array<{
-      name?: string;
-    }>;
-  } catch {
-    // Corrupt legacy FTS tables can throw during schema introspection. Force a
-    // drop/recreate so the existing self-heal path can repair the table.
-    summariesFtsColumns = null;
-  }
-  const hasSummaryIdColumn = summariesFtsColumns?.some((col) => col.name === "summary_id") ?? false;
-  const shouldRecreateSummariesFts =
-    !summariesFtsInfo ||
-    !summariesFtsColumns ||
-    !hasSummaryIdColumn ||
-    summariesFtsSql.includes("content_rowid='summary_id'") ||
-    summariesFtsSql.includes('content_rowid="summary_id"');
-  if (shouldRecreateSummariesFts) {
-    db.exec(`
-      DROP TABLE IF EXISTS summaries_fts;
+  ensureStandaloneFtsTable(db, {
+    tableName: "summaries_fts",
+    createSql: `
       CREATE VIRTUAL TABLE summaries_fts USING fts5(
         summary_id UNINDEXED,
         content,
         tokenize='porter unicode61'
-      );
+      )
+    `,
+    seedSql: `
       INSERT INTO summaries_fts(summary_id, content)
-      SELECT summary_id, content FROM summaries;
-    `);
-  }
+      SELECT summary_id, content FROM summaries
+    `,
+    expectedColumns: ["summary_id", "content"],
+    staleSchemaPatterns: [
+      "content_rowid='summary_id'",
+      'content_rowid="summary_id"',
+    ],
+  });
 
   // ── CJK trigram FTS table ────────────────────────────────────────────────
   // FTS5 unicode61 (porter) tokenizer cannot segment CJK ideographs, so CJK
@@ -735,20 +793,21 @@ export function runLcmMigrations(
   //
   // A trigram-tokenized table indexes every 3-character substring, enabling
   // native CJK substring matching via FTS5 MATCH with OR semantics.
-  const cjkTableExists = db
-    .prepare(
-      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='summaries_fts_cjk'",
-    )
-    .get();
-  if (!cjkTableExists) {
-    db.exec(`
-      CREATE VIRTUAL TABLE summaries_fts_cjk USING fts5(
-        summary_id UNINDEXED,
-        content,
-        tokenize='trigram'
-      );
-      INSERT INTO summaries_fts_cjk(summary_id, content)
-      SELECT summary_id, content FROM summaries;
-    `);
+  if (trigramTokenizerAvailable) {
+    ensureStandaloneFtsTable(db, {
+      tableName: "summaries_fts_cjk",
+      createSql: `
+        CREATE VIRTUAL TABLE summaries_fts_cjk USING fts5(
+          summary_id UNINDEXED,
+          content,
+          tokenize='trigram'
+        )
+      `,
+      seedSql: `
+        INSERT INTO summaries_fts_cjk(summary_id, content)
+        SELECT summary_id, content FROM summaries
+      `,
+      expectedColumns: ["summary_id", "content"],
+    });
   }
 }

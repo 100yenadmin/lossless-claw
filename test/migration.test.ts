@@ -1,14 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { closeLcmConnection, getLcmConnection } from "../src/db/connection.js";
+import * as features from "../src/db/features.js";
 import { runLcmMigrations } from "../src/db/migration.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
   closeLcmConnection();
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -343,6 +345,204 @@ describe("runLcmMigrations summary depth backfill", () => {
       {
         summary_id: "sum-1",
         content: "recover this summary",
+      },
+    ]);
+  });
+
+  it("recreates summaries_fts when a shadow table is missing", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "missing-summaries-fts-shadow.db");
+    const db = getLcmConnection(dbPath);
+
+    runLcmMigrations(db, { fts5Available: true });
+
+    db.prepare(`INSERT INTO conversations (conversation_id, session_id, title) VALUES (?, ?, ?)`).run(
+      1,
+      "legacy-session",
+      "Legacy",
+    );
+    db.prepare(
+      `INSERT INTO summaries (summary_id, conversation_id, kind, content, token_count, file_ids)
+       VALUES (?, ?, ?, ?, ?, '[]')`,
+    ).run("sum-1", 1, "leaf", "recover this summary", 5);
+
+    db.exec(`INSERT INTO summaries_fts(summary_id, content) VALUES ('sum-1', 'recover this summary')`);
+    db.exec(`DROP TABLE summaries_fts_data`);
+
+    expect(() => runLcmMigrations(db, { fts5Available: true })).not.toThrow();
+
+    const summariesFtsColumns = db.prepare(`PRAGMA table_info(summaries_fts)`).all() as Array<{
+      name?: string;
+    }>;
+    expect(summariesFtsColumns.map((column) => column.name)).toEqual(["summary_id", "content"]);
+
+    const shadowTables = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table' AND name IN (
+           'summaries_fts_data',
+           'summaries_fts_idx',
+           'summaries_fts_content',
+           'summaries_fts_docsize',
+           'summaries_fts_config'
+         )
+         ORDER BY name`,
+      )
+      .all() as Array<{ name: string }>;
+    expect(shadowTables.map((row) => row.name)).toEqual([
+      "summaries_fts_config",
+      "summaries_fts_content",
+      "summaries_fts_data",
+      "summaries_fts_docsize",
+      "summaries_fts_idx",
+    ]);
+
+    const summariesFtsRows = db
+      .prepare(`SELECT summary_id, content FROM summaries_fts ORDER BY summary_id`)
+      .all() as Array<{
+      summary_id: string;
+      content: string;
+    }>;
+    expect(summariesFtsRows).toEqual([
+      {
+        summary_id: "sum-1",
+        content: "recover this summary",
+      },
+    ]);
+  });
+
+  it("drops stale summaries_fts_cjk when trigram tokenizer support is unavailable", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "stale-summaries-fts-cjk.db");
+    const db = getLcmConnection(dbPath);
+
+    vi.spyOn(features, "getLcmDbFeatures").mockReturnValue({
+      fts5Available: true,
+      trigramTokenizerAvailable: false,
+    });
+
+    runLcmMigrations(db, { fts5Available: true });
+    db.exec(`CREATE TABLE summaries_fts_cjk (summary_id TEXT, content TEXT)`);
+
+    expect(() => runLcmMigrations(db, { fts5Available: true })).not.toThrow();
+
+    const row = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'summaries_fts_cjk'
+         LIMIT 1`,
+      )
+      .get() as { name?: string } | undefined;
+
+    expect(row).toBeUndefined();
+  });
+
+  it("drops stale summaries_fts_cjk before probing other standalone FTS tables", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "stale-summaries-fts-cjk-ordering.db");
+    const db = getLcmConnection(dbPath);
+
+    vi.spyOn(features, "getLcmDbFeatures").mockReturnValue({
+      fts5Available: true,
+      trigramTokenizerAvailable: false,
+    });
+
+    runLcmMigrations(db, { fts5Available: true });
+    db.exec(`CREATE TABLE summaries_fts_cjk (summary_id TEXT, content TEXT)`);
+
+    const dbWithPoisonedFtsProbe = {
+      prepare(sql: string) {
+        const staleCjkTable = db
+          .prepare(
+            `SELECT name
+             FROM sqlite_master
+             WHERE type = 'table' AND name = 'summaries_fts_cjk'
+             LIMIT 1`,
+          )
+          .get() as { name?: string } | undefined;
+        if (
+          staleCjkTable &&
+          sql.startsWith("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (")
+        ) {
+          throw new Error("malformed database schema (1)");
+        }
+        return db.prepare(sql);
+      },
+      exec(sql: string) {
+        return db.exec(sql);
+      },
+    } as unknown as Parameters<typeof runLcmMigrations>[0];
+
+    expect(() => runLcmMigrations(dbWithPoisonedFtsProbe, { fts5Available: true })).not.toThrow();
+
+    const row = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'summaries_fts_cjk'
+         LIMIT 1`,
+      )
+      .get() as { name?: string } | undefined;
+
+    expect(row).toBeUndefined();
+  });
+
+  it("drops orphaned standalone FTS shadow tables before recreating the virtual table", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "orphaned-fts-shadow-tables.db");
+    const db = getLcmConnection(dbPath);
+
+    runLcmMigrations(db, { fts5Available: true });
+    db.exec(`DROP TABLE summaries_fts`);
+    db.exec(`CREATE TABLE summaries_fts_data (id INTEGER PRIMARY KEY, block BLOB)`);
+    db.exec(`CREATE TABLE summaries_fts_idx (segid, term, pgno)`);
+    db.exec(`CREATE TABLE summaries_fts_content (id INTEGER PRIMARY KEY, c0, c1)`);
+    db.exec(`CREATE TABLE summaries_fts_docsize (id INTEGER PRIMARY KEY, sz BLOB)`);
+    db.exec(`CREATE TABLE summaries_fts_config (k PRIMARY KEY, v)`);
+    db.exec(`DELETE FROM summaries`);
+    db.exec(`INSERT INTO conversations (session_id) VALUES ('shadow-recovery')`);
+    db.exec(`
+      INSERT INTO summaries (summary_id, conversation_id, kind, depth, content, token_count, file_ids)
+      VALUES ('sum-shadow', 1, 'leaf', 0, 'shadow recovery summary', 12, '[]')
+    `);
+
+    expect(() => runLcmMigrations(db, { fts5Available: true })).not.toThrow();
+
+    const shadowRows = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE name LIKE 'summaries_fts%'
+           AND name NOT LIKE 'summaries_fts_cjk%'
+         ORDER BY name`,
+      )
+      .all() as Array<{ name: string }>;
+
+    expect(shadowRows.map((row) => row.name)).toEqual([
+      "summaries_fts",
+      "summaries_fts_config",
+      "summaries_fts_content",
+      "summaries_fts_data",
+      "summaries_fts_docsize",
+      "summaries_fts_idx",
+    ]);
+
+    const summariesFtsRows = db
+      .prepare(`SELECT summary_id, content FROM summaries_fts ORDER BY summary_id`)
+      .all() as Array<{
+      summary_id: string;
+      content: string;
+    }>;
+    expect(summariesFtsRows).toEqual([
+      {
+        summary_id: "sum-shadow",
+        content: "shadow recovery summary",
       },
     ]);
   });
