@@ -51,7 +51,7 @@ It looks for known summary-health markers that indicate:
 
 This gives users one place to answer the question “is my summary graph healthy?” without introducing a broader mutation surface.
 
-## What `/lcm doctor cleaners` tells you
+## What `/lcm doctor clean` tells you
 
 The cleaners flow is also diagnostic first.
 

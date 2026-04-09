@@ -6,7 +6,13 @@ import type { LcmSummarizeFn } from "../summarize.js";
 import type { LcmDependencies } from "../types.js";
 import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "openclaw/plugin-sdk";
 import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
-import { scanDoctorCleaners } from "./lcm-doctor-cleaners.js";
+import {
+  applyDoctorCleaners,
+  getDoctorCleanerApplyUnavailableReason,
+  getDoctorCleanerFilterIds,
+  scanDoctorCleaners,
+  type DoctorCleanerId,
+} from "./lcm-doctor-cleaners.js";
 import {
   detectDoctorMarker,
   getDoctorSummaryStats,
@@ -53,8 +59,10 @@ type CurrentConversationResolution =
 type ParsedLcmCommand =
   | { kind: "status" }
   | { kind: "doctor"; apply: boolean }
-  | { kind: "doctor_cleaners" }
+  | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
   | { kind: "help"; error?: string };
+
+const DOCTOR_CLEANER_IDS = new Set<DoctorCleanerId>(getDoctorCleanerFilterIds());
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -140,6 +148,32 @@ function splitArgs(rawArgs: string | undefined): string[] {
     .filter(Boolean);
 }
 
+function parseDoctorCleanerApplyArgs(tokens: string[]):
+  | { ok: true; filterId?: DoctorCleanerId; vacuum: boolean }
+  | { ok: false; error: string } {
+  let filterId: DoctorCleanerId | undefined;
+  let vacuum = false;
+
+  for (const token of tokens) {
+    const normalized = token.toLowerCase();
+    if (normalized === "vacuum") {
+      vacuum = true;
+      continue;
+    }
+    if (DOCTOR_CLEANER_IDS.has(normalized as DoctorCleanerId) && !filterId) {
+      filterId = normalized as DoctorCleanerId;
+      continue;
+    }
+    return {
+      ok: false,
+      error:
+        `\`${VISIBLE_COMMAND} doctor clean apply\` accepts at most one filter id (\`${getDoctorCleanerFilterIds().join("`, `")}\`) plus optional \`vacuum\`.`,
+    };
+  }
+
+  return { ok: true, filterId, vacuum };
+}
+
 function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
   const tokens = splitArgs(rawArgs);
   if (tokens.length === 0) {
@@ -156,8 +190,19 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
       if (rest.length === 0) {
         return { kind: "doctor", apply: false };
       }
-      if (rest.length === 1 && rest[0]?.toLowerCase() === "cleaners") {
-        return { kind: "doctor_cleaners" };
+      if (rest.length === 1 && rest[0]?.toLowerCase() === "clean") {
+        return { kind: "doctor_cleaners", apply: false, vacuum: false };
+      }
+      if (rest[0]?.toLowerCase() === "clean" && rest[1]?.toLowerCase() === "apply") {
+        const parsedApply = parseDoctorCleanerApplyArgs(rest.slice(2));
+        return parsedApply.ok
+          ? {
+              kind: "doctor_cleaners",
+              apply: true,
+              filterId: parsedApply.filterId,
+              vacuum: parsedApply.vacuum,
+            }
+          : { kind: "help", error: parsedApply.error };
       }
       if (rest.length === 1 && rest[0]?.toLowerCase() === "apply") {
         return { kind: "doctor", apply: true };
@@ -165,14 +210,14 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
       return {
         kind: "help",
         error:
-          `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`cleaners\` for global high-confidence junk diagnostics, or \`apply\` for the scoped repair path.`,
+          `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply\` for the scoped summary repair path.`,
       };
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor cleaners, doctor apply.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor clean, doctor apply, help.`,
       };
   }
 }
@@ -430,8 +475,12 @@ function buildHelpText(error?: string): string {
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, Global, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
       buildStatLine(
-        formatCommand(`${VISIBLE_COMMAND} doctor cleaners`),
+        formatCommand(`${VISIBLE_COMMAND} doctor clean`),
         "Report global high-confidence junk candidates without deleting anything.",
+      ),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} doctor clean apply`),
+        "Delete approved high-confidence cleaner matches after creating a DB backup.",
       ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
     ]),
@@ -612,7 +661,7 @@ async function buildDoctorCleanersText(params: {
   const lines = [
     ...buildHeaderLines(),
     "",
-    "🩺 Lossless Claw Doctor Cleaners",
+    "🩺 Lossless Claw Doctor Clean",
     "",
     buildSection("🌐 Global scan", [
       buildStatLine("filters", formatNumber(scan.filters.length)),
@@ -655,7 +704,142 @@ async function buildDoctorCleanersText(params: {
   lines.push(
     "",
     buildSection("🛠️ Next step", [
-      "Cleaner apply is intentionally not included in this build; review these diagnostics before any destructive workflow is added.",
+      `Review the examples, then run ${formatCommand(`${VISIBLE_COMMAND} doctor clean apply`)} to delete approved matches after Lossless Claw creates a backup.`,
+    ]),
+  );
+
+  return lines.join("\n");
+}
+
+function runQuickCheck(db: DatabaseSync): string {
+  const rows = db.prepare(`PRAGMA quick_check`).all() as Array<{ quick_check?: string }>;
+  const results = rows
+    .map((row) => row.quick_check)
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  if (results.length === 0) {
+    return "unknown";
+  }
+
+  if (results.length === 1 && results[0] === "ok") {
+    return "ok";
+  }
+
+  return results.join("; ");
+}
+
+function isPassingQuickCheck(result: string): boolean {
+  return result === "ok";
+}
+
+async function buildDoctorCleanersApplyText(params: {
+  db: DatabaseSync;
+  config: LcmConfig;
+  filterId?: DoctorCleanerId;
+  vacuum: boolean;
+}): Promise<string> {
+  const filterIds = params.filterId ? [params.filterId] : undefined;
+  const unavailableReason = getDoctorCleanerApplyUnavailableReason(params.config.databasePath);
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🩺 Lossless Claw Doctor Clean Apply",
+    "",
+    buildSection("🌐 Cleaner scope", [
+      buildStatLine(
+        "filters",
+        filterIds && filterIds.length > 0
+          ? filterIds.map((filter) => formatCommand(filter)).join(", ")
+          : "all approved cleaner filters",
+      ),
+      buildStatLine("vacuum requested", formatBoolean(params.vacuum)),
+    ]),
+    "",
+  ];
+  if (unavailableReason) {
+    lines.push(
+      buildSection("🛠️ Apply", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", unavailableReason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const before = scanDoctorCleaners(params.db, filterIds);
+  lines.splice(
+    lines.length - 1,
+    0,
+    buildSection("📊 Current matches", [
+      buildStatLine("matched conversations before apply", formatNumber(before.totalDistinctConversations)),
+      buildStatLine("matched messages before apply", formatNumber(before.totalDistinctMessages)),
+    ]),
+    "",
+  );
+
+  if (before.totalDistinctConversations === 0) {
+    lines.push(
+      buildSection("🛠️ Apply", [
+        buildStatLine("status", "completed"),
+        buildStatLine("backup path", "skipped (no matches)"),
+        buildStatLine("deleted conversations", "0"),
+        buildStatLine("deleted messages", "0"),
+        buildStatLine("vacuumed", "no"),
+        buildStatLine("quick_check", "not run (no writes)"),
+        buildStatLine("result", "clean; no deletes ran"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  let result: ReturnType<typeof applyDoctorCleaners>;
+  try {
+    result = applyDoctorCleaners(params.db, {
+      databasePath: params.config.databasePath,
+      filterIds,
+      vacuum: params.vacuum,
+    });
+  } catch (error) {
+    lines.push(
+      buildSection("🛠️ Apply", [
+        buildStatLine("status", "failed"),
+        buildStatLine(
+          "reason",
+          error instanceof Error ? error.message : "unknown cleaner apply failure",
+        ),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  if (result.kind === "unavailable") {
+    lines.push(
+      buildSection("🛠️ Apply", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", result.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const quickCheck = runQuickCheck(params.db);
+  const quickCheckPassed = isPassingQuickCheck(quickCheck);
+  lines.push(
+    buildSection("🛠️ Apply", [
+      buildStatLine("status", quickCheckPassed ? "completed" : "warning"),
+      buildStatLine("backup path", result.backupPath),
+      buildStatLine("deleted conversations", formatNumber(result.deletedConversations)),
+      buildStatLine("deleted messages", formatNumber(result.deletedMessages)),
+      buildStatLine("vacuumed", formatBoolean(result.vacuumed)),
+      buildStatLine("quick_check", quickCheck),
+      buildStatLine(
+        "result",
+        quickCheckPassed
+          ? result.deletedConversations > 0
+            ? `removed ${formatNumber(result.deletedConversations)} conversation(s)`
+            : "clean; no deletes ran"
+          : "writes committed, but SQLite integrity verification reported problems; inspect the database or restore from the backup before continuing",
+      ),
     ]),
   );
 
@@ -804,7 +988,8 @@ export function createLcmCommand(params: {
     nativeProgressMessages: {
       telegram: "Lossless Claw is working...",
     },
-    description: "Show Lossless Claw health, scan broken summaries, and repair scoped doctor issues.",
+    description:
+      "Show Lossless Claw health, scan broken summaries, inspect high-confidence junk candidates, and run scoped doctor actions.",
     acceptsArgs: true,
     handler: async (ctx) => {
       const parsed = parseLcmCommand(ctx.args);
@@ -824,7 +1009,16 @@ export function createLcmCommand(params: {
               }
             : { text: await buildDoctorText({ ctx, db: await getDb() }) };
         case "doctor_cleaners":
-          return { text: await buildDoctorCleanersText({ db: await getDb() }) };
+          return parsed.apply
+            ? {
+                text: await buildDoctorCleanersApplyText({
+                  db: await getDb(),
+                  config: params.config,
+                  filterId: parsed.filterId,
+                  vacuum: parsed.vacuum,
+                }),
+              }
+            : { text: await buildDoctorCleanersText({ db: await getDb() }) };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }

@@ -8,24 +8,34 @@ const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const connectionsByPath = new Map<ConnectionKey, Set<DatabaseSync>>();
 const connectionIndex = new Map<DatabaseSync, ConnectionKey>();
 
-function isInMemoryPath(dbPath: string): boolean {
+export function isInMemoryPath(dbPath: string): boolean {
   const normalized = dbPath.trim();
   return normalized === ":memory:" || normalized.startsWith("file::memory:");
 }
 
+export function getFileBackedDatabasePath(dbPath: string): string | null {
+  const trimmed = dbPath.trim();
+  if (!trimmed || isInMemoryPath(trimmed)) {
+    return null;
+  }
+  return resolve(trimmed);
+}
+
 export function normalizePath(dbPath: string): ConnectionKey {
-  if (isInMemoryPath(dbPath)) {
+  const fileBackedDatabasePath = getFileBackedDatabasePath(dbPath);
+  if (!fileBackedDatabasePath) {
     const trimmed = dbPath.trim();
     return trimmed.length > 0 ? trimmed : ":memory:";
   }
-  return resolve(dbPath);
+  return fileBackedDatabasePath;
 }
 
 function ensureDbDirectory(dbPath: string): void {
-  if (isInMemoryPath(dbPath)) {
+  const fileBackedDatabasePath = getFileBackedDatabasePath(dbPath);
+  if (!fileBackedDatabasePath) {
     return;
   }
-  mkdirSync(dirname(dbPath), { recursive: true });
+  mkdirSync(dirname(fileBackedDatabasePath), { recursive: true });
 }
 
 function configureConnection(db: DatabaseSync): DatabaseSync {

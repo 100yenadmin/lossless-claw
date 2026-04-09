@@ -29,7 +29,7 @@ What it should help confirm:
 - whether truncation markers exist
 - which conversations are affected most
 
-### `/lossless doctor cleaners`
+### `/lossless doctor clean`
 
 Use this when the user wants read-only diagnostics for high-confidence junk patterns before any cleanup.
 

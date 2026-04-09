@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,7 +27,7 @@ function createCommandFixture(options?: { summarize?: LcmSummarizeFn; deps?: Lcm
     summarize: options?.summarize,
     deps: options?.deps,
   });
-  return { tempDir, dbPath, command, conversationStore, summaryStore };
+  return { tempDir, dbPath, db, command, conversationStore, summaryStore };
 }
 
 function createCommandContext(
@@ -492,9 +492,31 @@ describe("lcm command", () => {
       },
     ]);
 
-    const result = await fixture.command.handler(createCommandContext("doctor cleaners"));
+    await fixture.conversationStore.archiveConversation(nullSubagent.conversationId);
 
-    expect(result.text).toContain("🩺 Lossless Claw Doctor Cleaners");
+    const liveNullSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-live-null-subagent",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: liveNullSubagent.conversationId,
+        seq: 0,
+        role: "user",
+        content: "[Subagent Context] Live child session still in progress.",
+        tokenCount: 8,
+      },
+      {
+        conversationId: liveNullSubagent.conversationId,
+        seq: 1,
+        role: "assistant",
+        content: "Still active and should not be treated as junk.",
+        tokenCount: 10,
+      },
+    ]);
+
+    const result = await fixture.command.handler(createCommandContext("doctor clean"));
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Clean");
     expect(result.text).toContain("mode: read-only diagnostics");
     expect(result.text).toContain("matched conversations: 3");
     expect(result.text).toContain("matched messages: 4");
@@ -504,12 +526,13 @@ describe("lcm command", () => {
     expect(result.text).toContain("agent:main:subagent:worker-1");
     expect(result.text).toContain("agent:main:cron:nightly");
     expect(result.text).toContain("\"[Subagent Context] Inspect the repo and summarize the issue.\"");
-    expect(result.text).toContain("Cleaner apply is intentionally not included in this build");
+    expect(result.text).toContain("run `/lossless doctor clean apply`");
+    expect(result.text).not.toContain("\"[Subagent Context] Live child session still in progress.\"");
     expect(result.text).not.toContain("doctor-cleaner-normal");
     expect(result.text).not.toContain("ordinary conversation");
   });
 
-  it("reports a clean doctor cleaners scan when no high-confidence candidates exist", async () => {
+  it("reports a clean doctor clean scan when no high-confidence candidates exist", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -528,13 +551,259 @@ describe("lcm command", () => {
       },
     ]);
 
-    const result = await fixture.command.handler(createCommandContext("doctor cleaners"));
+    const result = await fixture.command.handler(createCommandContext("doctor clean"));
 
-    expect(result.text).toContain("🩺 Lossless Claw Doctor Cleaners");
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Clean");
     expect(result.text).toContain("matched conversations: 0");
     expect(result.text).toContain("matched messages: 0");
     expect(result.text).toContain("No high-confidence cleaner candidates detected.");
     expect(result.text).not.toContain("🧹 Archived subagents");
+  });
+
+  it("applies all doctor clean filters with backup-first deletion and preserves unrelated conversations", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const archivedSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-apply-archived-subagent",
+      sessionKey: "agent:main:subagent:apply-worker",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: archivedSubagent.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "archived worker output",
+        tokenCount: 5,
+      },
+    ]);
+    await fixture.conversationStore.archiveConversation(archivedSubagent.conversationId);
+
+    const cronConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-apply-cron",
+      sessionKey: "agent:main:cron:apply-nightly",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: cronConversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "cron cleanup run",
+        tokenCount: 4,
+      },
+    ]);
+
+    const nullSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-apply-null",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: nullSubagent.conversationId,
+        seq: 1,
+        role: "user",
+        content: "[Subagent Context] Collect evidence and respond.",
+        tokenCount: 8,
+      },
+      {
+        conversationId: nullSubagent.conversationId,
+        seq: 2,
+        role: "assistant",
+        content: "Subagent result",
+        tokenCount: 4,
+      },
+    ]);
+    await fixture.conversationStore.archiveConversation(nullSubagent.conversationId);
+
+    const liveNullSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-apply-live-null",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: liveNullSubagent.conversationId,
+        seq: 0,
+        role: "user",
+        content: "[Subagent Context] Live child session still in progress.",
+        tokenCount: 8,
+      },
+      {
+        conversationId: liveNullSubagent.conversationId,
+        seq: 1,
+        role: "assistant",
+        content: "Still active and should not be treated as junk.",
+        tokenCount: 10,
+      },
+    ]);
+
+    const normalConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-apply-normal",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: normalConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "keep this conversation",
+        tokenCount: 4,
+      },
+    ]);
+
+    const result = await fixture.command.handler(createCommandContext("doctor clean apply"));
+
+    const backupPath = result.text.match(/backup path: (.+)/)?.[1]?.trim();
+    const quickCheck = fixture.db.prepare(`PRAGMA quick_check`).get() as { quick_check?: string } | undefined;
+    const remainingNormal = await fixture.conversationStore.getConversation(normalConversation.conversationId);
+    const removedArchived = await fixture.conversationStore.getConversation(archivedSubagent.conversationId);
+    const removedCron = await fixture.conversationStore.getConversation(cronConversation.conversationId);
+    const removedNull = await fixture.conversationStore.getConversation(nullSubagent.conversationId);
+    const remainingLiveNull = await fixture.conversationStore.getConversation(liveNullSubagent.conversationId);
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Clean Apply");
+    expect(result.text).toContain("matched conversations before apply: 3");
+    expect(result.text).toContain("deleted conversations: 3");
+    expect(result.text).toContain("deleted messages: 4");
+    expect(result.text).toContain("vacuumed: no");
+    expect(result.text).toContain("quick_check: ok");
+    expect(backupPath).toBeTruthy();
+    expect(existsSync(backupPath!)).toBe(true);
+    expect(quickCheck?.quick_check).toBe("ok");
+    expect(remainingNormal?.conversationId).toBe(normalConversation.conversationId);
+    expect(remainingLiveNull?.conversationId).toBe(liveNullSubagent.conversationId);
+    expect(removedArchived).toBeNull();
+    expect(removedCron).toBeNull();
+    expect(removedNull).toBeNull();
+  });
+
+  it("applies a single doctor clean filter without deleting other candidate classes", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const archivedSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-single-archived",
+      sessionKey: "agent:main:subagent:single-worker",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: archivedSubagent.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "archived single worker output",
+        tokenCount: 5,
+      },
+    ]);
+    await fixture.conversationStore.archiveConversation(archivedSubagent.conversationId);
+
+    const cronConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-single-cron",
+      sessionKey: "agent:main:cron:single-nightly",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: cronConversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "cron single run",
+        tokenCount: 4,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor clean apply cron_sessions"),
+    );
+
+    const remainingArchived = await fixture.conversationStore.getConversation(archivedSubagent.conversationId);
+    const removedCron = await fixture.conversationStore.getConversation(cronConversation.conversationId);
+
+    expect(result.text).toContain("filters: `cron_sessions`");
+    expect(result.text).toContain("matched conversations before apply: 1");
+    expect(result.text).toContain("deleted conversations: 1");
+    expect(remainingArchived?.conversationId).toBe(archivedSubagent.conversationId);
+    expect(removedCron).toBeNull();
+  });
+
+  it("vacuums after doctor clean apply when requested", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const cronConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-vacuum-cron",
+      sessionKey: "agent:main:cron:vacuum-nightly",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: cronConversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "cron vacuum run",
+        tokenCount: 4,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor clean apply cron_sessions vacuum"),
+    );
+    const walCheckpoint = fixture.db
+      .prepare(`PRAGMA wal_checkpoint`)
+      .get() as { busy?: number; log?: number; checkpointed?: number } | undefined;
+
+    expect(result.text).toContain("filters: `cron_sessions`");
+    expect(result.text).toContain("vacuum requested: yes");
+    expect(result.text).toContain("deleted conversations: 1");
+    expect(result.text).toContain("vacuumed: yes");
+    expect(walCheckpoint?.busy).toBe(0);
+  });
+
+  it("warns when doctor clean apply quick_check reports integrity issues", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const cronConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-warning-cron",
+      sessionKey: "agent:main:cron:warning-nightly",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: cronConversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "cron warning run",
+        tokenCount: 4,
+      },
+    ]);
+
+    const config = resolveLcmConfig({}, { dbPath: fixture.dbPath });
+    const dbWithQuickCheckWarning = new Proxy(fixture.db, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql === "PRAGMA quick_check") {
+              return {
+                all: () => [{ quick_check: "row 1 missing from index example_idx" }],
+              };
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as typeof fixture.db;
+    const command = createLcmCommand({
+      db: dbWithQuickCheckWarning,
+      config,
+    });
+
+    const result = await command.handler(
+      createCommandContext("doctor clean apply cron_sessions"),
+    );
+
+    expect(result.text).toContain("status: warning");
+    expect(result.text).toContain("quick_check: row 1 missing from index example_idx");
+    expect(result.text).toContain("writes committed, but SQLite integrity verification reported problems");
   });
 
   it("keeps doctor apply as a clean scoped no-op when no issues exist", async () => {

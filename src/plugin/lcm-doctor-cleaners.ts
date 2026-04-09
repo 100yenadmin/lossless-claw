@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
+import { basename, dirname, join } from "node:path";
+import { getFileBackedDatabasePath } from "../db/connection.js";
 
 export type DoctorCleanerId =
   | "archived_subagents"
@@ -26,6 +28,20 @@ export type DoctorCleanerScan = {
   totalDistinctConversations: number;
   totalDistinctMessages: number;
 };
+
+export type DoctorCleanerApplyResult =
+  | {
+      kind: "applied";
+      filterIds: DoctorCleanerId[];
+      deletedConversations: number;
+      deletedMessages: number;
+      vacuumed: boolean;
+      backupPath: string;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+    };
 
 type CleanerDefinition = {
   id: DoctorCleanerId;
@@ -71,13 +87,17 @@ const CLEANER_DEFINITIONS: CleanerDefinition[] = [
     id: "null_subagent_context",
     label: "NULL-key subagent context",
     description:
-      "Conversations with NULL session_key whose first stored message begins with [Subagent Context].",
-    candidatePredicateSql: "(c.session_key IS NULL)",
+      "Archived conversations with NULL session_key whose first stored message begins with [Subagent Context].",
+    candidatePredicateSql: "(c.session_key IS NULL AND c.active = 0 AND c.archived_at IS NOT NULL)",
     predicateSql:
-      "(c.session_key IS NULL AND message_stats.first_message_preview LIKE '[Subagent Context]%')",
+      "(c.session_key IS NULL AND c.active = 0 AND c.archived_at IS NOT NULL AND message_stats.first_message_preview LIKE '[Subagent Context]%')",
     needsFirstMessage: true,
   },
 ];
+
+const DOCTOR_CLEANER_IDS = CLEANER_DEFINITIONS.map(
+  (definition) => definition.id,
+) as DoctorCleanerId[];
 
 function getCleanerDefinitions(filterIds?: DoctorCleanerId[]): CleanerDefinition[] {
   if (!filterIds || filterIds.length === 0) {
@@ -236,6 +256,10 @@ export function getDoctorCleanerFilters(): Array<Pick<DoctorCleanerFilterStat, "
   }));
 }
 
+export function getDoctorCleanerFilterIds(): DoctorCleanerId[] {
+  return [...DOCTOR_CLEANER_IDS];
+}
+
 export function scanDoctorCleaners(
   db: DatabaseSync,
   filterIds?: DoctorCleanerId[],
@@ -353,4 +377,279 @@ export function scanDoctorCleaners(
   } finally {
     dropTempCleanerScanTables(db);
   }
+}
+
+function hasTable(db: DatabaseSync, tableName: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+    .get(tableName) as { found?: number } | undefined;
+  return row?.found === 1;
+}
+
+function dropTempCleanerTables(db: DatabaseSync): void {
+  db.exec(`DROP TABLE IF EXISTS temp.doctor_cleaner_first_messages`);
+  db.exec(`DROP TABLE IF EXISTS temp.doctor_cleaner_message_ids`);
+  db.exec(`DROP TABLE IF EXISTS temp.doctor_cleaner_summary_ids`);
+  db.exec(`DROP TABLE IF EXISTS temp.doctor_cleaner_conversation_ids`);
+}
+
+function stageTempCleanerFirstMessages(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TEMP TABLE doctor_cleaner_first_messages (
+      conversation_id INTEGER PRIMARY KEY,
+      first_message_preview TEXT
+    )
+  `);
+  db.exec(`
+    WITH ranked_messages AS (
+      SELECT
+        m.conversation_id,
+        substr(m.content, 1, ${SCAN_FIRST_MESSAGE_PREVIEW_LIMIT}) AS content,
+        ROW_NUMBER() OVER (
+          PARTITION BY m.conversation_id
+          ORDER BY m.seq ASC, m.created_at ASC, m.message_id ASC
+        ) AS row_num
+      FROM messages m
+    )
+    INSERT INTO temp.doctor_cleaner_first_messages (
+      conversation_id,
+      first_message_preview
+    )
+    SELECT
+      conversation_id,
+      MAX(CASE WHEN row_num = 1 THEN content END) AS first_message_preview
+    FROM ranked_messages
+    GROUP BY conversation_id
+  `);
+}
+
+function stageCleanerConversationIds(
+  db: DatabaseSync,
+  definitions: CleanerDefinition[],
+): void {
+  dropTempCleanerTables(db);
+  db.exec(`CREATE TEMP TABLE doctor_cleaner_conversation_ids (conversation_id INTEGER PRIMARY KEY)`);
+  db.exec(`CREATE TEMP TABLE doctor_cleaner_summary_ids (summary_id TEXT PRIMARY KEY)`);
+  db.exec(`CREATE TEMP TABLE doctor_cleaner_message_ids (message_id INTEGER PRIMARY KEY)`);
+
+  if (definitions.length === 0) {
+    return;
+  }
+
+  const needsFirstMessage = definitions.some((definition) => definition.needsFirstMessage);
+  if (needsFirstMessage) {
+    stageTempCleanerFirstMessages(db);
+  }
+  const matchedConversationsSql = buildMatchedConversationsSql({
+    definitions,
+    includeFilterId: false,
+    messageStatsTableName: needsFirstMessage
+      ? "temp.doctor_cleaner_first_messages"
+      : undefined,
+  });
+  db.exec(`
+    INSERT INTO temp.doctor_cleaner_conversation_ids (conversation_id)
+    SELECT DISTINCT conversation_id
+    FROM (
+      ${matchedConversationsSql}
+    )
+  `);
+
+  db.exec(`
+    INSERT INTO temp.doctor_cleaner_summary_ids (summary_id)
+    SELECT s.summary_id
+    FROM summaries s
+    JOIN temp.doctor_cleaner_conversation_ids ids
+      ON ids.conversation_id = s.conversation_id
+  `);
+
+  db.exec(`
+    INSERT INTO temp.doctor_cleaner_message_ids (message_id)
+    SELECT m.message_id
+    FROM messages m
+    JOIN temp.doctor_cleaner_conversation_ids ids
+      ON ids.conversation_id = m.conversation_id
+  `);
+}
+
+function readTempCleanerDeleteCounts(db: DatabaseSync): {
+  conversationCount: number;
+  messageCount: number;
+} {
+  const row = db
+    .prepare(
+      `SELECT
+         COALESCE((SELECT COUNT(*) FROM temp.doctor_cleaner_conversation_ids), 0) AS conversation_count,
+         COALESCE((SELECT COUNT(*) FROM temp.doctor_cleaner_message_ids), 0) AS message_count`,
+    )
+    .get() as CleanerCountRow | undefined;
+  return {
+    conversationCount: row?.conversation_count ?? 0,
+    messageCount: row?.message_count ?? 0,
+  };
+}
+
+function deleteTempCleanerCandidates(db: DatabaseSync): number {
+  const hasMessagesFts = hasTable(db, "messages_fts");
+  const hasSummariesFts = hasTable(db, "summaries_fts");
+  const hasSummariesFtsCjk = hasTable(db, "summaries_fts_cjk");
+
+  db.prepare(
+    `DELETE FROM summary_messages
+     WHERE summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+  ).run();
+  db.prepare(
+    `DELETE FROM summary_messages
+     WHERE message_id IN (SELECT message_id FROM temp.doctor_cleaner_message_ids)`,
+  ).run();
+
+  db.prepare(
+    `DELETE FROM summary_parents
+     WHERE summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+  ).run();
+  db.prepare(
+    `DELETE FROM summary_parents
+     WHERE parent_summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+  ).run();
+
+  db.prepare(
+    `DELETE FROM context_items
+     WHERE message_id IN (SELECT message_id FROM temp.doctor_cleaner_message_ids)`,
+  ).run();
+  db.prepare(
+    `DELETE FROM context_items
+     WHERE summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+  ).run();
+  db.prepare(
+    `DELETE FROM context_items
+     WHERE conversation_id IN (SELECT conversation_id FROM temp.doctor_cleaner_conversation_ids)`,
+  ).run();
+
+  if (hasMessagesFts) {
+    db.prepare(
+      `DELETE FROM messages_fts
+       WHERE rowid IN (SELECT message_id FROM temp.doctor_cleaner_message_ids)`,
+    ).run();
+  }
+  if (hasSummariesFts) {
+    db.prepare(
+      `DELETE FROM summaries_fts
+       WHERE summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+    ).run();
+  }
+  if (hasSummariesFtsCjk) {
+    db.prepare(
+      `DELETE FROM summaries_fts_cjk
+       WHERE summary_id IN (SELECT summary_id FROM temp.doctor_cleaner_summary_ids)`,
+    ).run();
+  }
+
+  return Number(
+    db
+      .prepare(
+        `DELETE FROM conversations
+         WHERE conversation_id IN (SELECT conversation_id FROM temp.doctor_cleaner_conversation_ids)`,
+      )
+      .run().changes ?? 0,
+  );
+}
+
+function quoteSqlString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+export function getDoctorCleanerApplyUnavailableReason(databasePath: string): string | null {
+  return getFileBackedDatabasePath(databasePath)
+    ? null
+    : "Cleaner apply requires a file-backed SQLite database so Lossless Claw can create a backup first.";
+}
+
+function buildCleanerBackupPath(databasePath: string): string | null {
+  const fileBackedDatabasePath = getFileBackedDatabasePath(databasePath);
+  if (!fileBackedDatabasePath) {
+    return null;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, "");
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return join(
+    dirname(fileBackedDatabasePath),
+    `${basename(fileBackedDatabasePath)}.doctor-cleaners-${timestamp}-${suffix}.bak`,
+  );
+}
+
+export function applyDoctorCleaners(
+  db: DatabaseSync,
+  options: {
+    databasePath: string;
+    filterIds?: DoctorCleanerId[];
+    vacuum?: boolean;
+  },
+): DoctorCleanerApplyResult {
+  const definitions = getCleanerDefinitions(options.filterIds);
+  if (definitions.length === 0) {
+    return {
+      kind: "unavailable",
+      reason: "No valid doctor cleaner filters were selected.",
+    };
+  }
+
+  const unavailableReason = getDoctorCleanerApplyUnavailableReason(options.databasePath);
+  if (unavailableReason) {
+    return {
+      kind: "unavailable",
+      reason: unavailableReason,
+    };
+  }
+  const backupPath = buildCleanerBackupPath(options.databasePath);
+  if (!backupPath) {
+    return {
+      kind: "unavailable",
+      reason:
+        getDoctorCleanerApplyUnavailableReason(options.databasePath)
+        ?? "Cleaner apply could not determine a backup path.",
+    };
+  }
+
+  db.exec(`VACUUM INTO ${quoteSqlString(backupPath)}`);
+
+  let deletedConversations = 0;
+  let deletedMessages = 0;
+  let vacuumed = false;
+  let transactionActive = false;
+
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    transactionActive = true;
+    stageCleanerConversationIds(db, definitions);
+    const counts = readTempCleanerDeleteCounts(db);
+    deletedMessages = counts.messageCount;
+    if (counts.conversationCount > 0) {
+      deletedConversations = deleteTempCleanerCandidates(db);
+    }
+    db.exec("COMMIT");
+    transactionActive = false;
+  } catch (error) {
+    if (transactionActive) {
+      db.exec("ROLLBACK");
+    }
+    throw error;
+  } finally {
+    dropTempCleanerTables(db);
+  }
+
+  if (options.vacuum && deletedConversations > 0) {
+    db.exec("VACUUM");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    vacuumed = true;
+  }
+
+  return {
+    kind: "applied",
+    filterIds: definitions.map((definition) => definition.id),
+    deletedConversations,
+    deletedMessages,
+    vacuumed,
+    backupPath,
+  };
 }

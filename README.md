@@ -34,14 +34,14 @@ The plugin now ships a bundled `lossless-claw` skill plus a small plugin command
 
 - `/lcm` shows version, enablement/selection state, DB path and size, summary counts, and summary-health status
 - `/lcm doctor` scans for broken or truncated summaries
-- `/lcm doctor cleaners` shows read-only high-confidence junk diagnostics for archived subagents, cron sessions, and NULL-key orphaned subagent runs
+- `/lcm doctor clean` shows read-only high-confidence junk diagnostics for archived subagents, cron sessions, and NULL-key orphaned subagent runs
 - `/lossless` is an alias for `/lcm` on supported native command surfaces
 
 These are plugin slash/native commands, not root shell CLI subcommands. Supported examples:
 
 - `/lcm`
 - `/lcm doctor`
-- `/lcm doctor cleaners`
+- `/lcm doctor clean`
 - `/lossless`
 
 Not currently supported as root CLI commands:
