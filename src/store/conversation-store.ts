@@ -100,6 +100,11 @@ export type MessageSearchInput = {
   sort?: SearchSort;
 };
 
+export type ConversationSegmentStats = {
+  messageCount: number;
+  latestMessageAt: Date | null;
+};
+
 export type MessageSearchResult = {
   messageId: MessageId;
   conversationId: ConversationId;
@@ -164,6 +169,10 @@ interface MaxSeqRow {
   max_seq: number;
 }
 
+interface LatestMessageAtRow {
+  latest_message_at: string | null;
+}
+
 // ── Row mappers ───────────────────────────────────────────────────────────────
 
 function toConversationRecord(row: ConversationRow): ConversationRecord {
@@ -178,6 +187,37 @@ function toConversationRecord(row: ConversationRow): ConversationRecord {
     createdAt: parseUtcTimestamp(row.created_at),
     updatedAt: parseUtcTimestamp(row.updated_at),
   };
+}
+
+function appendConversationScopeConstraint(params: {
+  where: string[];
+  args: Array<string | number>;
+  columnExpr: string;
+  conversationId?: ConversationId;
+  conversationIds?: ConversationId[];
+}): void {
+  const normalizedConversationIds = [...new Set(
+    (params.conversationIds ?? [])
+      .filter((value) => Number.isFinite(value))
+      .map((value) => Math.trunc(value)),
+  )];
+  if (normalizedConversationIds.length > 0) {
+    if (normalizedConversationIds.length === 1) {
+      params.where.push(`${params.columnExpr} = ?`);
+      params.args.push(normalizedConversationIds[0]!);
+      return;
+    }
+    params.where.push(
+      `${params.columnExpr} IN (${normalizedConversationIds.map(() => "?").join(", ")})`,
+    );
+    params.args.push(...normalizedConversationIds);
+    return;
+  }
+
+  if (params.conversationId != null) {
+    params.where.push(`${params.columnExpr} = ?`);
+    params.args.push(params.conversationId);
+  }
 }
 
 function toMessageRecord(row: MessageRow): MessageRecord {
@@ -682,6 +722,23 @@ export class ConversationStore {
       .prepare(`SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?`)
       .get(conversationId) as unknown as CountRow;
     return row?.count ?? 0;
+  }
+
+  async getConversationSegmentStats(
+    conversationId: ConversationId,
+  ): Promise<ConversationSegmentStats> {
+    const latestMessageRow = this.db
+      .prepare(
+        `SELECT MAX(created_at) AS latest_message_at
+         FROM messages
+         WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as unknown as LatestMessageAtRow | undefined;
+
+    return {
+      messageCount: await this.getMessageCount(conversationId),
+      latestMessageAt: parseUtcTimestampOrNull(latestMessageRow?.latest_message_at),
+    };
   }
 
   async getMaxSeq(conversationId: ConversationId): Promise<number> {
