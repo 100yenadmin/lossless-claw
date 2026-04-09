@@ -129,6 +129,7 @@ function makeEngine(params: {
   retrieval: ReturnType<typeof makeRetrieval>;
   summaryStore?: ReturnType<typeof makeSummaryStore>;
   conversationId?: number;
+  conversationFamilyIds?: number[];
 }): LcmContextEngine {
   return {
     info: { id: "lcm", name: "LCM", version: "0.0.0" },
@@ -146,6 +147,13 @@ function makeEngine(params: {
               updatedAt: new Date("2026-01-01T00:00:00.000Z"),
             }
           : null,
+      ),
+      getConversationFamilyIds: vi.fn(async () =>
+        params.conversationFamilyIds && params.conversationFamilyIds.length > 0
+          ? params.conversationFamilyIds
+          : typeof params.conversationId === "number"
+            ? [params.conversationId]
+            : [],
       ),
     }),
   } as unknown as LcmContextEngine;
@@ -272,6 +280,95 @@ describe("createLcmExpandQueryTool", () => {
       block: 0,
       timeout: 0,
       success: 1,
+    });
+  });
+
+  it("resolves a single source conversation from a session family query", async () => {
+    const retrieval = makeRetrieval();
+    retrieval.grep.mockResolvedValue({
+      messages: [],
+      summaries: [
+        {
+          summaryId: "sum_recent",
+          conversationId: 42,
+          kind: "leaf",
+          snippet: "recent snippet",
+          createdAt: new Date("2026-01-02T00:00:00.000Z"),
+        },
+        {
+          summaryId: "sum_older",
+          conversationId: 21,
+          kind: "leaf",
+          snippet: "older snippet",
+          createdAt: new Date("2025-12-31T00:00:00.000Z"),
+        },
+      ],
+      totalMatches: 2,
+    });
+
+    let delegatedMessage = "";
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      if (request.method === "agent") {
+        delegatedMessage = String(request.params?.message ?? "");
+        return { runId: "run-family" };
+      }
+      if (request.method === "agent.wait") {
+        return { status: "ok" };
+      }
+      if (request.method === "sessions.get") {
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    answer: "Recent segment wins.",
+                    citedIds: ["sum_recent"],
+                    expandedSummaryCount: 1,
+                    totalSourceTokens: 1200,
+                    truncated: false,
+                  }),
+                },
+              ],
+            },
+          ],
+        };
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true };
+      }
+      return {};
+    });
+
+    const tool = createLcmExpandQueryTool({
+      deps: makeDeps(),
+      lcm: makeEngine({
+        retrieval,
+        conversationId: 42,
+        conversationFamilyIds: [42, 21],
+      }),
+      sessionId: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+    });
+    const result = await tool.execute("call-family-query", {
+      query: "deployment",
+      prompt: "What changed recently?",
+    });
+
+    expect(retrieval.grep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "summaries",
+        conversationIds: [42, 21],
+      }),
+    );
+    expect(delegatedMessage).toContain("Conversation scope: 42");
+    expect(result.details).toMatchObject({
+      answer: "Recent segment wins.",
+      citedIds: ["sum_recent"],
+      sourceConversationId: 42,
     });
   });
 

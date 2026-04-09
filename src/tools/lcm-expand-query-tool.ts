@@ -560,6 +560,7 @@ function parseDelegatedExpandQueryReply(
  */
 function resolveSourceConversationId(params: {
   scopedConversationId?: number;
+  allowedConversationIds?: number[];
   allConversations: boolean;
   candidates: SummaryCandidate[];
 }): number {
@@ -578,6 +579,15 @@ function resolveSourceConversationId(params: {
   const conversationIds = Array.from(
     new Set(params.candidates.map((candidate) => candidate.conversationId)),
   );
+  const allowedConversationIds = new Set(params.allowedConversationIds ?? []);
+  if (allowedConversationIds.size > 1) {
+    const firstAllowed = params.candidates.find((candidate) =>
+      allowedConversationIds.has(candidate.conversationId),
+    );
+    if (firstAllowed) {
+      return firstAllowed.conversationId;
+    }
+  }
   if (conversationIds.length === 1 && typeof conversationIds[0] === "number") {
     return conversationIds[0];
   }
@@ -632,6 +642,7 @@ async function resolveSummaryCandidates(params: {
   explicitSummaryIds: string[];
   query?: string;
   conversationId?: number;
+  conversationIds?: number[];
 }): Promise<SummaryCandidate[]> {
   const retrieval = params.lcm.getRetrieval();
   const candidates = new Map<string, SummaryCandidate>();
@@ -657,6 +668,7 @@ async function resolveSummaryCandidates(params: {
       mode: "full_text",
       scope: "summaries",
       conversationId: params.conversationId,
+      conversationIds: params.conversationIds,
     });
     for (const summary of grepResult.summaries) {
       upsertSummaryCandidate(candidates, {
@@ -668,18 +680,23 @@ async function resolveSummaryCandidates(params: {
       });
     }
 
-    if (grepResult.summaries.length === 0 && typeof params.conversationId === "number") {
-      const maxDepth = await summaryStore.getConversationMaxSummaryDepth(params.conversationId);
+    const fallbackConversationId =
+      typeof params.conversationId === "number"
+        ? params.conversationId
+        : params.conversationIds?.[0];
+    if (grepResult.summaries.length === 0 && typeof fallbackConversationId === "number") {
+      const maxDepth = await summaryStore.getConversationMaxSummaryDepth(fallbackConversationId);
       if (typeof maxDepth === "number" && maxDepth <= 1) {
         const messageResult = await retrieval.grep({
           query: params.query,
           mode: "full_text",
           scope: "messages",
-          conversationId: params.conversationId,
+          conversationId: fallbackConversationId,
+          conversationIds: params.conversationIds,
         });
         const messageIds = messageResult.messages.map((message) => message.messageId);
         const leafLinks = await summaryStore.getLeafSummaryLinksForMessageIds(
-          params.conversationId,
+          fallbackConversationId,
           messageIds,
         );
         const summaryIdsByMessageId = new Map<number, string[]>();
@@ -694,7 +711,7 @@ async function resolveSummaryCandidates(params: {
           for (const summaryId of summaryIdsByMessageId.get(message.messageId) ?? []) {
             upsertSummaryCandidate(candidates, {
               summaryId,
-              conversationId: params.conversationId,
+              conversationId: fallbackConversationId,
               requiresMessageExpansion: true,
               isExplicit: false,
               matchedAt: message.createdAt,
@@ -986,10 +1003,15 @@ export function createLcmExpandQueryTool(input: {
           sessionKey: input.sessionKey,
           params: p,
         });
-        let scopedConversationId = conversationScope.conversationId;
+        const familyScopedConversationId =
+          (conversationScope.conversationIds?.length ?? 0) > 1
+            ? undefined
+            : conversationScope.conversationId;
+        let scopedConversationId = familyScopedConversationId;
         if (
           !conversationScope.allConversations &&
           scopedConversationId == null &&
+          (conversationScope.conversationIds?.length ?? 0) <= 1 &&
           callerSessionKey
         ) {
           scopedConversationId = await resolveRequesterConversationScopeId({
@@ -999,7 +1021,11 @@ export function createLcmExpandQueryTool(input: {
           });
         }
 
-        if (!conversationScope.allConversations && scopedConversationId == null) {
+        if (
+          !conversationScope.allConversations &&
+          scopedConversationId == null &&
+          (conversationScope.conversationIds?.length ?? 0) <= 1
+        ) {
           return jsonResult({
             error:
               "No LCM conversation found for this session. Provide conversationId or set allConversations=true.",
@@ -1011,6 +1037,7 @@ export function createLcmExpandQueryTool(input: {
           explicitSummaryIds,
           query: query || undefined,
           conversationId: scopedConversationId,
+          conversationIds: conversationScope.conversationIds,
         });
 
         if (candidates.length === 0) {
