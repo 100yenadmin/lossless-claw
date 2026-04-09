@@ -143,7 +143,7 @@ function stageCleanerScanTables(db: DatabaseSync, definitions: CleanerDefinition
     WITH ranked_messages AS (
       SELECT
         m.conversation_id,
-        substr(m.content, 1, ${SCAN_FIRST_MESSAGE_PREVIEW_LIMIT}) AS content,
+        m.content,
         ROW_NUMBER() OVER (
           PARTITION BY m.conversation_id
           ORDER BY m.seq ASC, m.created_at ASC, m.message_id ASC
@@ -158,7 +158,7 @@ function stageCleanerScanTables(db: DatabaseSync, definitions: CleanerDefinition
     )
     SELECT
       conversation_id,
-      MAX(CASE WHEN row_num = 1 THEN content END) AS first_message_preview,
+      MAX(CASE WHEN row_num = 1 THEN substr(content, 1, ${SCAN_FIRST_MESSAGE_PREVIEW_LIMIT}) END) AS first_message_preview,
       MAX(message_count) AS message_count
     FROM ranked_messages
     GROUP BY conversation_id

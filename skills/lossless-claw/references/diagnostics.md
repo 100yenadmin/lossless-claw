@@ -29,6 +29,19 @@ What it should help confirm:
 - whether truncation markers exist
 - which conversations are affected most
 
+### `/lossless doctor cleaners`
+
+Use this when the user wants read-only diagnostics for high-confidence junk patterns before any cleanup.
+
+It should help confirm:
+
+- whether archived subagent sessions are present
+- whether cron sessions are accumulating unexpectedly
+- whether NULL-key orphaned subagent conversations are present
+- which high-confidence filters match the most conversations and messages
+
+This command is read-only. It is the discovery step before `/lossless doctor cleaners apply`.
+
 ## Interpreting common states
 
 ### `/lossless` tokens vs `/status` context
