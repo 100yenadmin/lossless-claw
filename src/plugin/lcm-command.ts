@@ -6,6 +6,7 @@ import type { LcmSummarizeFn } from "../summarize.js";
 import type { LcmDependencies } from "../types.js";
 import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "openclaw/plugin-sdk";
 import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
+import { scanDoctorCleaners } from "./lcm-doctor-cleaners.js";
 import {
   detectDoctorMarker,
   getDoctorSummaryStats,
@@ -52,6 +53,7 @@ type CurrentConversationResolution =
 type ParsedLcmCommand =
   | { kind: "status" }
   | { kind: "doctor"; apply: boolean }
+  | { kind: "doctor_cleaners" }
   | { kind: "help"; error?: string };
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -154,19 +156,23 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
       if (rest.length === 0) {
         return { kind: "doctor", apply: false };
       }
+      if (rest.length === 1 && rest[0]?.toLowerCase() === "cleaners") {
+        return { kind: "doctor_cleaners" };
+      }
       if (rest.length === 1 && rest[0]?.toLowerCase() === "apply") {
         return { kind: "doctor", apply: true };
       }
       return {
         kind: "help",
-        error: "`/lcm doctor` accepts no arguments, or `apply` for the scoped repair path.",
+        error:
+          "`/lcm doctor` accepts no arguments, `cleaners` for global high-confidence junk diagnostics, or `apply` for the scoped repair path.",
       };
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor apply.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor cleaners, doctor apply.`,
       };
   }
 }
@@ -423,6 +429,10 @@ function buildHelpText(error?: string): string {
       buildStatLine(formatCommand(VISIBLE_COMMAND), "Show compact status output."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, Global, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} doctor cleaners`),
+        "Report global high-confidence junk candidates without deleting anything.",
+      ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
     ]),
     "",
@@ -433,6 +443,17 @@ function buildHelpText(error?: string): string {
     ]),
   ];
   return lines.join("\n");
+}
+
+function buildDoctorCleanerExampleLine(params: {
+  conversationId: number;
+  sessionKey: string | null;
+  messageCount: number;
+  firstMessagePreview: string | null;
+}): string {
+  const sessionKey = params.sessionKey ? formatCommand(truncateMiddle(params.sessionKey, 44)) : "missing";
+  const preview = params.firstMessagePreview ? ` · first: "${params.firstMessagePreview}"` : "";
+  return `conv ${formatNumber(params.conversationId)} · session key ${sessionKey} · messages ${formatNumber(params.messageCount)}${preview}`;
 }
 
 async function buildStatusText(params: {
@@ -580,6 +601,63 @@ async function buildDoctorText(params: {
       ]),
     );
   }
+
+  return lines.join("\n");
+}
+
+async function buildDoctorCleanersText(params: {
+  db: DatabaseSync;
+}): Promise<string> {
+  const scan = scanDoctorCleaners(params.db);
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🩺 Lossless Claw Doctor Cleaners",
+    "",
+    buildSection("🌐 Global scan", [
+      buildStatLine("filters", formatNumber(scan.filters.length)),
+      buildStatLine("matched conversations", formatNumber(scan.totalDistinctConversations)),
+      buildStatLine("matched messages", formatNumber(scan.totalDistinctMessages)),
+      buildStatLine("mode", "read-only diagnostics"),
+    ]),
+  ];
+
+  if (scan.filters.every((filter) => filter.conversationCount === 0)) {
+    lines.push(
+      "",
+      buildSection("✅ Result", ["No high-confidence cleaner candidates detected."]),
+    );
+    return lines.join("\n");
+  }
+
+  for (const filter of scan.filters) {
+    lines.push(
+      "",
+      buildSection(`🧹 ${filter.label}`, [
+        buildStatLine("filter id", formatCommand(filter.id)),
+        buildStatLine("description", filter.description),
+        buildStatLine("matched conversations", formatNumber(filter.conversationCount)),
+        buildStatLine("matched messages", formatNumber(filter.messageCount)),
+      ]),
+    );
+
+    if (filter.examples.length > 0) {
+      lines.push(
+        "",
+        buildSection(
+          "🧷 Examples",
+          filter.examples.map((example) => buildDoctorCleanerExampleLine(example)),
+        ),
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    buildSection("🛠️ Next step", [
+      "Cleaner apply is intentionally not included in this build; review these diagnostics before any destructive workflow is added.",
+    ]),
+  );
 
   return lines.join("\n");
 }
@@ -745,6 +823,8 @@ export function createLcmCommand(params: {
                 }),
               }
             : { text: await buildDoctorText({ ctx, db: await getDb() }) };
+        case "doctor_cleaners":
+          return { text: await buildDoctorCleanersText({ db: await getDb() }) };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }
@@ -758,6 +838,7 @@ export const __testing = {
   getDoctorSummaryStats,
   getLcmStatusStats,
   getConversationStatusStats,
+  scanDoctorCleaners,
   resolveCurrentConversation,
   resolveContextEngineSlot,
   resolvePluginEnabled,

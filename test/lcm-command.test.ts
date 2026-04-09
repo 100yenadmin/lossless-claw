@@ -424,6 +424,119 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("sum_unresolved_other");
   });
 
+  it("reports global high-confidence cleaner candidates with examples", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const archivedSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-archived-subagent",
+      sessionKey: "agent:main:subagent:worker-1",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: archivedSubagent.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "archived subagent chatter",
+        tokenCount: 4,
+      },
+    ]);
+    await fixture.conversationStore.archiveConversation(archivedSubagent.conversationId);
+
+    const cronConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-cron",
+      sessionKey: "agent:main:cron:nightly",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: cronConversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "cron wake-up",
+        tokenCount: 3,
+      },
+    ]);
+
+    const nullSubagent = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-null-subagent",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: nullSubagent.conversationId,
+        seq: 1,
+        role: "user",
+        content: "[Subagent Context] Inspect the repo and summarize the issue.",
+        tokenCount: 12,
+      },
+      {
+        conversationId: nullSubagent.conversationId,
+        seq: 2,
+        role: "assistant",
+        content: "Working through the task now.",
+        tokenCount: 7,
+      },
+    ]);
+
+    const normalConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaner-normal",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: normalConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "ordinary conversation",
+        tokenCount: 4,
+      },
+    ]);
+
+    const result = await fixture.command.handler(createCommandContext("doctor cleaners"));
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Cleaners");
+    expect(result.text).toContain("mode: read-only diagnostics");
+    expect(result.text).toContain("matched conversations: 3");
+    expect(result.text).toContain("matched messages: 4");
+    expect(result.text).toContain("filter id: `archived_subagents`");
+    expect(result.text).toContain("filter id: `cron_sessions`");
+    expect(result.text).toContain("filter id: `null_subagent_context`");
+    expect(result.text).toContain("agent:main:subagent:worker-1");
+    expect(result.text).toContain("agent:main:cron:nightly");
+    expect(result.text).toContain("\"[Subagent Context] Inspect the repo and summarize the issue.\"");
+    expect(result.text).toContain("Cleaner apply is intentionally not included in this build");
+    expect(result.text).not.toContain("doctor-cleaner-normal");
+    expect(result.text).not.toContain("ordinary conversation");
+  });
+
+  it("reports a clean doctor cleaners scan when no high-confidence candidates exist", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-cleaners-clean",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "healthy conversation",
+        tokenCount: 3,
+      },
+    ]);
+
+    const result = await fixture.command.handler(createCommandContext("doctor cleaners"));
+
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Cleaners");
+    expect(result.text).toContain("matched conversations: 0");
+    expect(result.text).toContain("matched messages: 0");
+    expect(result.text).toContain("No high-confidence cleaner candidates detected.");
+    expect(result.text).not.toContain("🧹 Archived subagents");
+  });
+
   it("keeps doctor apply as a clean scoped no-op when no issues exist", async () => {
     const summarize = vi.fn(async () => "should not run");
     const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
