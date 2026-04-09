@@ -516,6 +516,25 @@ describe("resolveLcmConfig", () => {
     });
   });
 
+  it("ships uiHints for sessionBifurcation controls", () => {
+    expect(manifest.uiHints["sessionBifurcation.enabled"]).toEqual({
+      label: "Session Bifurcation",
+      help: "When enabled, very long-lived sessions rotate into archived segments while keeping the same active session key.",
+    });
+    expect(manifest.uiHints["sessionBifurcation.maxConversationMessages"]).toEqual({
+      label: "Bifurcation Max Messages",
+      help: "Hard message ceiling for one physical conversation segment before LCM rotates to a fresh active segment.",
+    });
+    expect(manifest.uiHints["sessionBifurcation.maxConversationAgeHours"]).toEqual({
+      label: "Bifurcation Max Age (hours)",
+      help: "Maximum age, in hours, for a physical conversation segment before age-based rotation is allowed.",
+    });
+    expect(manifest.uiHints["sessionBifurcation.minMessagesBeforeAgeSplit"]).toEqual({
+      label: "Bifurcation Min Messages",
+      help: "Minimum projected message count required before the age-based bifurcation path can rotate a session.",
+    });
+  });
+
   it("ships a manifest with cacheAwareCompaction in schema", () => {
     expect(manifest.configSchema.properties.cacheAwareCompaction).toEqual({
       type: "object",

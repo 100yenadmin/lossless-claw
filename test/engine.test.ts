@@ -1400,6 +1400,65 @@ describe("LcmContextEngine session bifurcation", () => {
       "cache C",
     ]);
   });
+
+  it("does not advance bifurcation cache for heartbeat-only turns", async () => {
+    const engine = createEngineWithConfig({
+      sessionBifurcation: {
+        enabled: true,
+        maxConversationMessages: 2,
+        maxConversationAgeHours: 168,
+        minMessagesBeforeAgeSplit: 1,
+      },
+    });
+    const store = engine.getConversationStore();
+    const sessionKey = "agent:main:main";
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-heartbeat",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-heartbeat-a"),
+      messages: [makeMessage({ role: "user", content: "first real turn" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const firstConversation = await store.getConversationBySessionKey(sessionKey);
+    expect(firstConversation).not.toBeNull();
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-heartbeat",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-heartbeat-b"),
+      messages: [
+        makeMessage({ role: "user", content: "first real turn" }),
+        makeMessage({ role: "assistant", content: "heartbeat noop" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+      isHeartbeat: true,
+    });
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-heartbeat",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-heartbeat-c"),
+      messages: [
+        makeMessage({ role: "user", content: "first real turn" }),
+        makeMessage({ role: "assistant", content: "second real turn" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const currentConversation = await store.getConversationBySessionKey(sessionKey);
+    const currentMessages = await store.getMessages(currentConversation!.conversationId);
+
+    expect(currentConversation?.conversationId).toBe(firstConversation?.conversationId);
+    expect(currentMessages.map((message) => message.content)).toEqual([
+      "first real turn",
+      "second real turn",
+    ]);
+  });
 });
 
 describe("LcmContextEngine delegated session continuity", () => {

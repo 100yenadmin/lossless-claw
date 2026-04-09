@@ -3486,23 +3486,26 @@ export class LcmContextEngine implements ContextEngine {
           return;
         }
 
-        const bifurcationPlan = await this.maybeRotateSessionConversation({
-          sessionId: params.sessionId,
-          sessionKey: params.sessionKey,
-          pendingMessageCount: ingestBatch.length,
-        });
+        const isHeartbeatTurn = params.isHeartbeat === true;
+        const bifurcationPlan = isHeartbeatTurn
+          ? null
+          : await this.maybeRotateSessionConversation({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              pendingMessageCount: ingestBatch.length,
+            });
 
         try {
-          await this.ingestBatchLocked({
+          const ingestResult = await this.ingestBatchLocked({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
             messages: ingestBatch,
-            isHeartbeat: params.isHeartbeat === true,
+            isHeartbeat: isHeartbeatTurn,
           });
-          if (bifurcationPlan) {
+          if (bifurcationPlan && ingestResult.ingestedCount > 0) {
             this.primeBifurcationMessageCount(
               bifurcationPlan.conversationId,
-              bifurcationPlan.messageCountBeforeIngest + ingestBatch.length,
+              bifurcationPlan.messageCountBeforeIngest + ingestResult.ingestedCount,
             );
           }
         } catch (error) {
