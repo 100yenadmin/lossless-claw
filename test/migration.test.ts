@@ -367,8 +367,8 @@ describe("runLcmMigrations summary depth backfill", () => {
        VALUES (?, ?, ?, ?, ?, '[]')`,
     ).run("sum-1", 1, "leaf", "recover this summary", 5);
 
-    db.exec(`INSERT INTO summaries_fts(summary_id, content) VALUES ('sum-1', 'recover this summary')`);
-    db.exec(`DROP TABLE summaries_fts_data`);
+    db.exec(`DROP TABLE summaries_fts`);
+    db.exec(`CREATE TABLE summaries_fts (summary_id TEXT PRIMARY KEY)`);
 
     expect(() => runLcmMigrations(db, { fts5Available: true })).not.toThrow();
 
@@ -441,6 +441,7 @@ describe("runLcmMigrations summary depth backfill", () => {
     expect(row).toBeUndefined();
   });
 
+<<<<<<< HEAD
   it("drops stale summaries_fts_cjk before probing other standalone FTS tables", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
     tempDirs.push(tempDir);

@@ -518,6 +518,9 @@ function ensureStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec): void {
   }
 
   db.exec(`DROP TABLE IF EXISTS ${spec.tableName}`);
+  for (const shadowTableName of getFtsShadowTableNames(spec.tableName)) {
+    db.exec(`DROP TABLE IF EXISTS ${shadowTableName}`);
+  }
   db.exec(spec.createSql);
   db.exec(spec.seedSql);
 }
