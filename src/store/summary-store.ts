@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { withDatabaseTransaction } from "../transaction-mutex.js";
+import { appendConversationScopeConstraint } from "./conversation-scope.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
 import { buildLikeSearchPlan, containsCjk, createFallbackSnippet } from "./full-text-fallback.js";
 import { parseUtcTimestamp, parseUtcTimestampOrNull } from "./parse-utc-timestamp.js";
@@ -220,36 +221,6 @@ interface ConversationBootstrapStateRow {
   last_processed_offset: number;
   last_processed_entry_hash: string | null;
   updated_at: string;
-}
-
-function appendConversationScopeConstraint(params: {
-  where: string[];
-  args: Array<string | number>;
-  columnExpr: string;
-  conversationId?: number;
-  conversationIds?: number[];
-}): void {
-  const normalizedConversationIds = [...new Set(
-    (params.conversationIds ?? [])
-      .filter((value) => Number.isFinite(value))
-      .map((value) => Math.trunc(value)),
-  )];
-  if (normalizedConversationIds.length > 0) {
-    if (normalizedConversationIds.length === 1) {
-      params.where.push(`${params.columnExpr} = ?`);
-      params.args.push(normalizedConversationIds[0]!);
-      return;
-    }
-    params.where.push(
-      `${params.columnExpr} IN (${normalizedConversationIds.map(() => "?").join(", ")})`,
-    );
-    params.args.push(...normalizedConversationIds);
-    return;
-  }
-  if (params.conversationId != null) {
-    params.where.push(`${params.columnExpr} = ?`);
-    params.args.push(params.conversationId);
-  }
 }
 
 const CJK_QUERY_SEGMENT_RE =

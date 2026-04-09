@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { withDatabaseTransaction } from "../transaction-mutex.js";
+import { appendConversationScopeConstraint } from "./conversation-scope.js";
 import { sanitizeFts5Query } from "./fts5-sanitize.js";
 import { buildLikeSearchPlan, containsCjk, createFallbackSnippet } from "./full-text-fallback.js";
 import { parseUtcTimestamp, parseUtcTimestampOrNull } from "./parse-utc-timestamp.js";
@@ -186,37 +187,6 @@ function toConversationRecord(row: ConversationRow): ConversationRecord {
     createdAt: parseUtcTimestamp(row.created_at),
     updatedAt: parseUtcTimestamp(row.updated_at),
   };
-}
-
-function appendConversationScopeConstraint(params: {
-  where: string[];
-  args: Array<string | number>;
-  columnExpr: string;
-  conversationId?: ConversationId;
-  conversationIds?: ConversationId[];
-}): void {
-  const normalizedConversationIds = [...new Set(
-    (params.conversationIds ?? [])
-      .filter((value) => Number.isFinite(value))
-      .map((value) => Math.trunc(value)),
-  )];
-  if (normalizedConversationIds.length > 0) {
-    if (normalizedConversationIds.length === 1) {
-      params.where.push(`${params.columnExpr} = ?`);
-      params.args.push(normalizedConversationIds[0]!);
-      return;
-    }
-    params.where.push(
-      `${params.columnExpr} IN (${normalizedConversationIds.map(() => "?").join(", ")})`,
-    );
-    params.args.push(...normalizedConversationIds);
-    return;
-  }
-
-  if (params.conversationId != null) {
-    params.where.push(`${params.columnExpr} = ?`);
-    params.args.push(params.conversationId);
-  }
 }
 
 function toMessageRecord(row: MessageRow): MessageRecord {
