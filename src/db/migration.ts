@@ -481,6 +481,13 @@ function getFtsShadowTableNames(tableName: string): string[] {
   ];
 }
 
+function quoteSqlIdentifier(identifier: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    throw new Error(`Invalid SQL identifier: ${identifier}`);
+  }
+  return `"${identifier.replaceAll(`"`, `""`)}"`;
+}
+
 function shouldRecreateStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec): boolean {
   const shadowTables = getFtsShadowTableNames(spec.tableName);
   const existingTables = getExistingTableNames(db, [spec.tableName, ...shadowTables]);
@@ -500,7 +507,9 @@ function shouldRecreateStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec):
       return true;
     }
 
-    const columns = db.prepare(`PRAGMA table_info(${spec.tableName})`).all() as SummaryColumnInfo[];
+    const columns = db
+      .prepare(`PRAGMA table_info(${quoteSqlIdentifier(spec.tableName)})`)
+      .all() as SummaryColumnInfo[];
     const columnNames = new Set(
       columns
         .map((col) => col.name)
@@ -517,9 +526,9 @@ function ensureStandaloneFtsTable(db: DatabaseSync, spec: FtsTableSpec): void {
     return;
   }
 
-  db.exec(`DROP TABLE IF EXISTS ${spec.tableName}`);
+  db.exec(`DROP TABLE IF EXISTS ${quoteSqlIdentifier(spec.tableName)}`);
   for (const shadowTableName of getFtsShadowTableNames(spec.tableName)) {
-    db.exec(`DROP TABLE IF EXISTS ${shadowTableName}`);
+    db.exec(`DROP TABLE IF EXISTS ${quoteSqlIdentifier(shadowTableName)}`);
   }
   db.exec(spec.createSql);
   db.exec(spec.seedSql);
