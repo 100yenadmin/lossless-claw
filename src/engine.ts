@@ -2044,6 +2044,72 @@ export class LcmContextEngine implements ContextEngine {
     }
   }
 
+  private shouldSkipSessionBifurcation(sessionKey: string): boolean {
+    return (
+      sessionKey.startsWith("agent:main:subagent:") ||
+      sessionKey.startsWith("agent:main:cron:")
+    );
+  }
+
+  private async maybeRotateSessionConversation(params: {
+    sessionId: string;
+    sessionKey?: string;
+    pendingMessageCount: number;
+  }): Promise<void> {
+    const bifurcation = this.config.sessionBifurcation;
+    if (!bifurcation.enabled) {
+      return;
+    }
+    if (params.pendingMessageCount <= 0) {
+      return;
+    }
+
+    const normalizedSessionKey = params.sessionKey?.trim();
+    if (!normalizedSessionKey || this.shouldSkipSessionBifurcation(normalizedSessionKey)) {
+      return;
+    }
+
+    const activeConversation = await this.conversationStore.getConversationForSession({
+      sessionId: params.sessionId,
+      sessionKey: normalizedSessionKey,
+    });
+    if (!activeConversation?.active) {
+      return;
+    }
+
+    const stats = await this.conversationStore.getConversationSegmentStats(
+      activeConversation.conversationId,
+    );
+    if (stats.messageCount <= 0) {
+      return;
+    }
+
+    const ageHours = Math.max(
+      0,
+      (Date.now() - activeConversation.createdAt.getTime()) / (60 * 60 * 1000),
+    );
+    const projectedMessageCount = stats.messageCount + params.pendingMessageCount;
+    const hitMessageLimit = projectedMessageCount > bifurcation.maxConversationMessages;
+    const hitAgeLimit =
+      projectedMessageCount >= bifurcation.minMessagesBeforeAgeSplit &&
+      ageHours >= bifurcation.maxConversationAgeHours;
+
+    if (!hitMessageLimit && !hitAgeLimit) {
+      return;
+    }
+
+    await this.conversationStore.archiveConversation(activeConversation.conversationId);
+    await this.conversationStore.createConversation({
+      sessionId: params.sessionId,
+      sessionKey: normalizedSessionKey,
+      title: activeConversation.title ?? undefined,
+    });
+
+    this.deps.log.info(
+      `[lcm] session bifurcation: archived conversation=${activeConversation.conversationId} session=${params.sessionId} sessionKey=${normalizedSessionKey} messageCount=${stats.messageCount} projectedMessageCount=${projectedMessageCount} ageHours=${ageHours.toFixed(1)} reason=${hitMessageLimit ? "message-threshold" : "age-threshold"}`,
+    );
+  }
+
   /** Format stable session identifiers for LCM diagnostic logs. */
   private formatSessionLogContext(params: {
     conversationId: number;
@@ -3375,6 +3441,12 @@ export class LcmContextEngine implements ContextEngine {
       );
       return;
     }
+
+    await this.maybeRotateSessionConversation({
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      pendingMessageCount: ingestBatch.length,
+    });
 
     try {
       await this.ingestBatch({

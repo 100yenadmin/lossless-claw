@@ -35,6 +35,12 @@ describe("resolveLcmConfig", () => {
       enabled: true,
       max: 40000,
     });
+    expect(config.sessionBifurcation).toEqual({
+      enabled: false,
+      maxConversationMessages: 50000,
+      maxConversationAgeHours: 168,
+      minMessagesBeforeAgeSplit: 2000,
+    });
   });
 
   it("reads values from plugin config", () => {
@@ -60,6 +66,12 @@ describe("resolveLcmConfig", () => {
       dynamicLeafChunkTokens: {
         enabled: true,
         max: 50000,
+      },
+      sessionBifurcation: {
+        enabled: true,
+        maxConversationMessages: 12345,
+        maxConversationAgeHours: 72,
+        minMessagesBeforeAgeSplit: 1500,
       },
     });
     expect(config.enabled).toBe(false);
@@ -87,6 +99,12 @@ describe("resolveLcmConfig", () => {
       enabled: true,
       max: 80000,
     });
+    expect(config.sessionBifurcation).toEqual({
+      enabled: true,
+      maxConversationMessages: 12345,
+      maxConversationAgeHours: 72,
+      minMessagesBeforeAgeSplit: 1500,
+    });
   });
 
   it("env vars override plugin config", () => {
@@ -105,6 +123,10 @@ describe("resolveLcmConfig", () => {
       LCM_HOT_CACHE_BUDGET_HEADROOM_RATIO: "0.25",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_ENABLED: "true",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_MAX: "60000",
+      LCM_SESSION_BIFURCATION_ENABLED: "true",
+      LCM_SESSION_BIFURCATION_MAX_MESSAGES: "22222",
+      LCM_SESSION_BIFURCATION_MAX_AGE_HOURS: "48",
+      LCM_SESSION_BIFURCATION_MIN_MESSAGES: "900",
     } as NodeJS.ProcessEnv;
     const pluginConfig = {
       contextThreshold: 0.5,
@@ -123,6 +145,12 @@ describe("resolveLcmConfig", () => {
       dynamicLeafChunkTokens: {
         enabled: false,
         max: 50000,
+      },
+      sessionBifurcation: {
+        enabled: false,
+        maxConversationMessages: 11111,
+        maxConversationAgeHours: 96,
+        minMessagesBeforeAgeSplit: 200,
       },
     };
     const config = resolveLcmConfig(env, pluginConfig);
@@ -149,6 +177,12 @@ describe("resolveLcmConfig", () => {
     expect(config.dynamicLeafChunkTokens).toEqual({
       enabled: true,
       max: 60000,
+    });
+    expect(config.sessionBifurcation).toEqual({
+      enabled: true,
+      maxConversationMessages: 22222,
+      maxConversationAgeHours: 48,
+      minMessagesBeforeAgeSplit: 900,
     });
   });
 

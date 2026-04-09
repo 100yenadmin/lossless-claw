@@ -64,6 +64,12 @@ function createTestConfig(databasePath: string): LcmConfig {
       enabled: true,
       max: 40_000,
     },
+    sessionBifurcation: {
+      enabled: false,
+      maxConversationMessages: 50_000,
+      maxConversationAgeHours: 168,
+      minMessagesBeforeAgeSplit: 2_000,
+    },
   };
 }
 
@@ -1249,6 +1255,101 @@ describe("LcmContextEngine session_end lifecycle", () => {
 
     expect(firstFresh?.conversationId).not.toBe(original.conversationId);
     expect(secondFresh?.conversationId).toBe(firstFresh?.conversationId);
+  });
+});
+
+describe("LcmContextEngine session bifurcation", () => {
+  it("rotates to a fresh active conversation when a session segment exceeds the message threshold", async () => {
+    const engine = createEngineWithConfig({
+      sessionBifurcation: {
+        enabled: true,
+        maxConversationMessages: 2,
+        maxConversationAgeHours: 168,
+        minMessagesBeforeAgeSplit: 2,
+      },
+    });
+    const store = engine.getConversationStore();
+    const sessionKey = "agent:main:main";
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-threshold",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-threshold-a"),
+      messages: [
+        makeMessage({ role: "user", content: "old A" }),
+        makeMessage({ role: "assistant", content: "old B" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const firstConversation = await store.getConversationBySessionKey(sessionKey);
+    expect(firstConversation).not.toBeNull();
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-threshold",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-threshold-b"),
+      messages: [
+        makeMessage({ role: "user", content: "old A" }),
+        makeMessage({ role: "assistant", content: "old B" }),
+        makeMessage({ role: "user", content: "new C" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const activeConversation = await store.getConversationBySessionKey(sessionKey);
+    const archivedConversation = await store.getConversation(firstConversation!.conversationId);
+    const activeMessages = await store.getMessages(activeConversation!.conversationId);
+
+    expect(activeConversation).not.toBeNull();
+    expect(activeConversation!.conversationId).not.toBe(firstConversation!.conversationId);
+    expect(archivedConversation?.active).toBe(false);
+    expect(activeMessages.map((message) => message.content)).toEqual(["new C"]);
+  });
+
+  it("does not bifurcate excluded cron sessions", async () => {
+    const engine = createEngineWithConfig({
+      sessionBifurcation: {
+        enabled: true,
+        maxConversationMessages: 1,
+        maxConversationAgeHours: 168,
+        minMessagesBeforeAgeSplit: 1,
+      },
+    });
+    const store = engine.getConversationStore();
+    const sessionKey = "agent:main:cron:nightly";
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-cron",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-cron-a"),
+      messages: [makeMessage({ role: "assistant", content: "cron A" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const originalConversation = await store.getConversationBySessionKey(sessionKey);
+    expect(originalConversation).not.toBeNull();
+
+    await engine.afterTurn({
+      sessionId: "bifurcation-cron",
+      sessionKey,
+      sessionFile: createSessionFilePath("bifurcation-cron-b"),
+      messages: [
+        makeMessage({ role: "assistant", content: "cron A" }),
+        makeMessage({ role: "assistant", content: "cron B" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const currentConversation = await store.getConversationBySessionKey(sessionKey);
+    const currentMessages = await store.getMessages(currentConversation!.conversationId);
+
+    expect(currentConversation?.conversationId).toBe(originalConversation?.conversationId);
+    expect(currentMessages.map((message) => message.content)).toEqual(["cron A", "cron B"]);
   });
 });
 
