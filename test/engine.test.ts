@@ -49,6 +49,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     summaryTimeoutMs: 60_000,
     timezone: "UTC",
     pruneHeartbeatOk: false,
+    transcriptGcEnabled: false,
     summaryMaxOverageFactor: 3,
     customInstructions: "",
     circuitBreakerThreshold: 5,
@@ -1733,7 +1734,10 @@ describe("LcmContextEngine.ingest content extraction", () => {
 
   it("maintain() requests transcript rewrites for summarized externalized tool results", async () => {
     await withTempHome(async () => {
-      const engine = createEngineWithConfig({ largeFileTokenThreshold: 20 });
+      const engine = createEngineWithConfig({
+        largeFileTokenThreshold: 20,
+        transcriptGcEnabled: true,
+      });
       const sessionId = randomUUID();
       const sessionFile = createSessionFilePath("transcript-gc-maintain");
       const toolOutput = `${"tool output line\n".repeat(160)}done`;
@@ -1900,6 +1904,41 @@ describe("LcmContextEngine.ingest content extraction", () => {
         reason: "conversation already up to date",
       });
       expect(reconcileSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("maintain() skips transcript GC when transcriptGcEnabled is false", async () => {
+    await withTempHome(async () => {
+      const engine = createEngineWithConfig({
+        transcriptGcEnabled: false,
+      });
+      const sessionId = randomUUID();
+      const sessionFile = createSessionFilePath("transcript-gc-disabled");
+      const rewriteTranscriptEntries = vi.fn();
+
+      const ingested = await engine.ingest({
+        sessionId,
+        message: makeMessage({ role: "user", content: "keep LCM active" }),
+      });
+
+      expect(ingested).toEqual({ ingested: true });
+
+      const result = await engine.maintain({
+        sessionId,
+        sessionFile,
+        runtimeContext: {
+          rewriteTranscriptEntries,
+        },
+      });
+
+      expect(result).toEqual({
+        changed: false,
+        bytesFreed: 0,
+        rewrittenEntries: 0,
+        reason: "transcript GC disabled",
+      });
+      expect(rewriteTranscriptEntries).not.toHaveBeenCalled();
+      expect(await engine.getConversationStore().getConversationBySessionId(sessionId)).not.toBeNull();
     });
   });
 

@@ -42,6 +42,7 @@ Most installations only need to override a handful of keys. If you want a comple
   "summaryTimeoutMs": 60000,
   "timezone": "America/Los_Angeles",
   "pruneHeartbeatOk": false,
+  "transcriptGcEnabled": false,
   "maxAssemblyTokenBudget": 30000,
   "summaryMaxOverageFactor": 3,
   "customInstructions": "",
@@ -105,6 +106,7 @@ openclaw plugins install --link /path/to/lossless-claw
 | `newSessionRetainDepth` | `integer` | `2` | `LCM_NEW_SESSION_RETAIN_DEPTH` | Controls what survives `/new`. `-1` keeps all context, `0` keeps summaries only, higher values keep only deeper summaries. |
 | `timezone` | `string` | `TZ` or system timezone | `TZ` | IANA timezone used for timestamp rendering in summaries. |
 | `pruneHeartbeatOk` | `boolean` | `false` | `LCM_PRUNE_HEARTBEAT_OK` | Retroactively removes `HEARTBEAT_OK` turn cycles from persisted storage. |
+| `transcriptGcEnabled` | `boolean` | `false` | `LCM_TRANSCRIPT_GC_ENABLED` | Enables transcript rewrite GC during `maintain()`; disabled by default so transcript rewrites stay opt-in. |
 
 ### Compaction thresholds and summary sizing
 

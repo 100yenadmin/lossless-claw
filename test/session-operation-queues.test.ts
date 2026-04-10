@@ -49,6 +49,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     summaryTimeoutMs: 60_000,
     timezone: "UTC",
     pruneHeartbeatOk: false,
+    transcriptGcEnabled: false,
     summaryMaxOverageFactor: 3,
     expansionProvider: "",
     expansionModel: "",

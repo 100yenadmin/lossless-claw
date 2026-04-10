@@ -44,6 +44,7 @@ function createTestConfig(overrides: Partial<LcmConfig> = {}): LcmConfig {
     autocompactDisabled: false,
     timezone: "UTC",
     pruneHeartbeatOk: false,
+    transcriptGcEnabled: false,
     summaryMaxOverageFactor: 3,
     delegationTimeoutMs: 120000,
     customInstructions: "",

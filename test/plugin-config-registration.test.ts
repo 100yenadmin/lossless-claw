@@ -186,6 +186,7 @@ describe("lcm plugin registration", () => {
       ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
+      transcriptGcEnabled: true,
       largeFileThresholdTokens: 12345,
     });
     lcmPlugin.register(api);
@@ -216,17 +217,13 @@ describe("lcm plugin registration", () => {
       ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
+      transcriptGcEnabled: true,
       largeFileTokenThreshold: 12345,
     });
     expect(infoLog).toHaveBeenCalledWith(
       `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33)`,
     );
-    expect(infoLog).toHaveBeenCalledWith(
-      "[lcm] Ignoring sessions matching 2 pattern(s): agent:*:cron:**, agent:main:subagent:**",
-    );
-    expect(infoLog).toHaveBeenCalledWith(
-      "[lcm] Stateless session patterns: 1 pattern(s): agent:*:subagent:**",
-    );
+    expect(infoLog).toHaveBeenCalledWith("[lcm] Transcript GC enabled (default false)");
     expect(infoLog).toHaveBeenCalledWith(
       "[lcm] Compaction summarization model: (unconfigured)",
     );
@@ -543,17 +540,15 @@ describe("lcm plugin registration", () => {
     const startupBannerMessages = [...firstMessages, ...secondMessages].filter((message) =>
       [
         "[lcm] Plugin loaded (enabled=true, db=",
+        "[lcm] Transcript GC ",
         "[lcm] Compaction summarization model:",
-        "[lcm] Ignoring sessions matching ",
-        "[lcm] Stateless session patterns:",
       ].some((prefix) => message.startsWith(prefix)),
     );
 
     expect(startupBannerMessages.sort()).toEqual([
       `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33)`,
+      "[lcm] Transcript GC disabled (default false)",
       "[lcm] Compaction summarization model: (unconfigured)",
-      "[lcm] Ignoring sessions matching 2 pattern(s): agent:*:cron:**, agent:main:subagent:**",
-      "[lcm] Stateless session patterns: 1 pattern(s): agent:*:subagent:**",
     ].sort());
     expect(firstSessionMessages).toEqual([]);
     expect(secondSessionMessages).toEqual([]);

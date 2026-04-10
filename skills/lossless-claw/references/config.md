@@ -173,6 +173,15 @@ Why it matters:
 - lower values externalize more aggressively
 - higher values keep more payload inline but can bloat storage and compaction inputs
 
+### `transcriptGcEnabled`
+
+Controls whether `maintain()` rewrites transcript entries for already-externalized tool results.
+
+Why it matters:
+
+- keep this off unless you want transcript GC to mutate the live session file during maintenance
+- the default is `false`
+
 ## Compaction timing and shape
 
 ### `contextThreshold`

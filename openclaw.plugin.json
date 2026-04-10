@@ -168,6 +168,10 @@
       "label": "Prune HEARTBEAT_OK",
       "help": "Retroactively delete HEARTBEAT_OK turn cycles from LCM storage"
     },
+    "transcriptGcEnabled": {
+      "label": "Transcript GC",
+      "help": "Enable transcript rewrite GC during maintain(); disabled by default"
+    },
     "fallbackProviders": {
       "label": "Fallback Providers",
       "help": "Explicit fallback provider/model pairs for compaction summarization (e.g., [{\"provider\": \"anthropic\", \"model\": \"claude-haiku-4-5\"}])"
@@ -339,6 +343,9 @@
         "type": "string"
       },
       "pruneHeartbeatOk": {
+        "type": "boolean"
+      },
+      "transcriptGcEnabled": {
         "type": "boolean"
       },
       "databasePath": {

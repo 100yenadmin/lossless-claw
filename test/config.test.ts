@@ -25,6 +25,7 @@ describe("resolveLcmConfig", () => {
     expect(config.summaryProvider).toBe("");
     expect(config.summaryModel).toBe("");
     expect(config.pruneHeartbeatOk).toBe(false);
+    expect(config.transcriptGcEnabled).toBe(false);
     expect(config.cacheAwareCompaction).toEqual({
       enabled: true,
       maxColdCacheCatchupPasses: 2,
@@ -50,6 +51,7 @@ describe("resolveLcmConfig", () => {
       leafMinFanout: 4,
       condensedMinFanout: 2,
       pruneHeartbeatOk: true,
+      transcriptGcEnabled: true,
       enabled: false,
       cacheAwareCompaction: {
         enabled: false,
@@ -77,6 +79,7 @@ describe("resolveLcmConfig", () => {
     expect(config.leafMinFanout).toBe(4);
     expect(config.condensedMinFanout).toBe(2);
     expect(config.pruneHeartbeatOk).toBe(true);
+    expect(config.transcriptGcEnabled).toBe(true);
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
       maxColdCacheCatchupPasses: 3,
@@ -99,6 +102,7 @@ describe("resolveLcmConfig", () => {
       LCM_IGNORE_SESSION_PATTERNS: "agent:*:cron:*, agent:main:subagent:**",
       LCM_STATELESS_SESSION_PATTERNS: "agent:*:ephemeral:**, agent:main:preview:*",
       LCM_SKIP_STATELESS_SESSIONS: "false",
+      LCM_TRANSCRIPT_GC_ENABLED: "true",
       LCM_CACHE_AWARE_COMPACTION_ENABLED: "false",
       LCM_MAX_COLD_CACHE_CATCHUP_PASSES: "4",
       LCM_HOT_CACHE_PRESSURE_FACTOR: "5.5",
@@ -113,6 +117,7 @@ describe("resolveLcmConfig", () => {
       ignoreSessionPatterns: ["agent:*:test:*"],
       statelessSessionPatterns: ["agent:*:preview:*"],
       skipStatelessSessions: true,
+      transcriptGcEnabled: false,
       enabled: true,
       cacheAwareCompaction: {
         enabled: true,
@@ -136,6 +141,7 @@ describe("resolveLcmConfig", () => {
       "agent:main:preview:*",
     ]);
     expect(config.skipStatelessSessions).toBe(false);
+    expect(config.transcriptGcEnabled).toBe(true);
     expect(config.contextThreshold).toBe(0.9); // env wins
     expect(config.freshTailCount).toBe(64); // env wins
     expect(config.newSessionRetainDepth).toBe(5); // env wins
@@ -455,6 +461,12 @@ describe("resolveLcmConfig", () => {
           minimum: 1,
         },
       },
+    });
+  });
+
+  it("ships a manifest with transcriptGcEnabled in schema", () => {
+    expect(manifest.configSchema.properties.transcriptGcEnabled).toEqual({
+      type: "boolean",
     });
   });
 

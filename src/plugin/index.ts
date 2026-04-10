@@ -1272,6 +1272,12 @@ function createLcmDependencies(api: OpenClawPluginApi): LcmDependencies {
     log.warn(buildLegacyAuthFallbackWarning());
   }
 
+  logStartupBannerOnce({
+    key: "transcript-gc-enabled",
+    log: (message) => log.info(message),
+    message: `[lcm] Transcript GC ${config.transcriptGcEnabled ? "enabled" : "disabled"} (default false)`,
+  });
+
   /** Resolve the best config object to hand to runtime.modelAuth for this lookup. */
   const resolveModelAuthConfig = (runtimeConfig: unknown): OpenClawPluginApi["config"] => {
     if (runtimeConfig && typeof runtimeConfig === "object") {
