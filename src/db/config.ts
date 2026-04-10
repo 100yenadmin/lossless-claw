@@ -6,6 +6,7 @@ export type CacheAwareCompactionConfig = {
   maxColdCacheCatchupPasses: number;
   hotCachePressureFactor: number;
   hotCacheBudgetHeadroomRatio: number;
+  coldCacheObservationThreshold: number;
 };
 
 export type DynamicLeafChunkTokensConfig = {
@@ -218,6 +219,14 @@ export function resolveLcmConfig(
         ?? 0.2,
     ),
   );
+  const resolvedColdCacheObservationThreshold = Math.max(
+    1,
+    Math.floor(
+      parseFiniteNumber(env.LCM_COLD_CACHE_OBSERVATION_THRESHOLD)
+        ?? toNumber(cacheAwareCompaction?.coldCacheObservationThreshold)
+        ?? 3,
+    ),
+  );
 
   return {
     enabled:
@@ -333,6 +342,7 @@ export function resolveLcmConfig(
           ?? 2,
       hotCachePressureFactor: resolvedHotCachePressureFactor,
       hotCacheBudgetHeadroomRatio: resolvedHotCacheBudgetHeadroomRatio,
+      coldCacheObservationThreshold: resolvedColdCacheObservationThreshold,
     },
     dynamicLeafChunkTokens: {
       enabled:

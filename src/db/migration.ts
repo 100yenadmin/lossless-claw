@@ -96,6 +96,9 @@ function ensureSummaryModelColumn(db: DatabaseSync): void {
 
 function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
   const telemetryColumns = db.prepare(`PRAGMA table_info(conversation_compaction_telemetry)`).all() as SummaryColumnInfo[];
+  const hasConsecutiveColdObservations = telemetryColumns.some(
+    (col) => col.name === "consecutive_cold_observations",
+  );
   const hasLastLeafCompactionAt = telemetryColumns.some((col) => col.name === "last_leaf_compaction_at");
   const hasTurnsSinceLeafCompaction = telemetryColumns.some((col) => col.name === "turns_since_leaf_compaction");
   const hasTokensAccumulatedSinceLeafCompaction = telemetryColumns.some(
@@ -103,6 +106,11 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
   );
   const hasLastActivityBand = telemetryColumns.some((col) => col.name === "last_activity_band");
 
+  if (!hasConsecutiveColdObservations) {
+    db.exec(
+      `ALTER TABLE conversation_compaction_telemetry ADD COLUMN consecutive_cold_observations INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
   if (!hasLastLeafCompactionAt) {
     db.exec(`ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_leaf_compaction_at TEXT`);
   }
@@ -701,6 +709,7 @@ export function runLcmMigrations(
       last_observed_cache_break_at TEXT,
       cache_state TEXT NOT NULL DEFAULT 'unknown'
         CHECK (cache_state IN ('hot', 'cold', 'unknown')),
+      consecutive_cold_observations INTEGER NOT NULL DEFAULT 0,
       retention TEXT,
       last_leaf_compaction_at TEXT,
       turns_since_leaf_compaction INTEGER NOT NULL DEFAULT 0,

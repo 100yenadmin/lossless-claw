@@ -30,6 +30,7 @@ describe("resolveLcmConfig", () => {
       maxColdCacheCatchupPasses: 2,
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
+      coldCacheObservationThreshold: 3,
     });
     expect(config.dynamicLeafChunkTokens).toEqual({
       enabled: true,
@@ -56,6 +57,7 @@ describe("resolveLcmConfig", () => {
         maxColdCacheCatchupPasses: 3,
         hotCachePressureFactor: 6,
         hotCacheBudgetHeadroomRatio: 0.35,
+        coldCacheObservationThreshold: 4,
       },
       dynamicLeafChunkTokens: {
         enabled: true,
@@ -82,6 +84,7 @@ describe("resolveLcmConfig", () => {
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
+      coldCacheObservationThreshold: 4,
     });
     expect(config.dynamicLeafChunkTokens).toEqual({
       enabled: true,
@@ -103,6 +106,7 @@ describe("resolveLcmConfig", () => {
       LCM_MAX_COLD_CACHE_CATCHUP_PASSES: "4",
       LCM_HOT_CACHE_PRESSURE_FACTOR: "5.5",
       LCM_HOT_CACHE_BUDGET_HEADROOM_RATIO: "0.25",
+      LCM_COLD_CACHE_OBSERVATION_THRESHOLD: "5",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_ENABLED: "true",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_MAX: "60000",
     } as NodeJS.ProcessEnv;
@@ -119,6 +123,7 @@ describe("resolveLcmConfig", () => {
         maxColdCacheCatchupPasses: 2,
         hotCachePressureFactor: 3,
         hotCacheBudgetHeadroomRatio: 0.1,
+        coldCacheObservationThreshold: 2,
       },
       dynamicLeafChunkTokens: {
         enabled: false,
@@ -145,6 +150,7 @@ describe("resolveLcmConfig", () => {
       maxColdCacheCatchupPasses: 4,
       hotCachePressureFactor: 5.5,
       hotCacheBudgetHeadroomRatio: 0.25,
+      coldCacheObservationThreshold: 5,
     });
     expect(config.dynamicLeafChunkTokens).toEqual({
       enabled: true,
@@ -260,6 +266,7 @@ describe("resolveLcmConfig", () => {
         maxColdCacheCatchupPasses: 3,
         hotCachePressureFactor: 6,
         hotCacheBudgetHeadroomRatio: 0.35,
+        coldCacheObservationThreshold: 4,
       },
     });
 
@@ -268,6 +275,7 @@ describe("resolveLcmConfig", () => {
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
+      coldCacheObservationThreshold: 4,
     });
   });
 
@@ -478,6 +486,10 @@ describe("resolveLcmConfig", () => {
           type: "number",
           minimum: 0,
           maximum: 0.95,
+        },
+        coldCacheObservationThreshold: {
+          type: "integer",
+          minimum: 1,
         },
       },
     });
