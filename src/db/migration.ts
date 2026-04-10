@@ -102,6 +102,7 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
     (col) => col.name === "tokens_accumulated_since_leaf_compaction",
   );
   const hasLastActivityBand = telemetryColumns.some((col) => col.name === "last_activity_band");
+  const hasLastApiCallAt = telemetryColumns.some((col) => col.name === "last_api_call_at");
 
   if (!hasLastLeafCompactionAt) {
     db.exec(`ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_leaf_compaction_at TEXT`);
@@ -119,6 +120,11 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
   if (!hasLastActivityBand) {
     db.exec(
       `ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_activity_band TEXT NOT NULL DEFAULT 'low' CHECK (last_activity_band IN ('low', 'medium', 'high'))`,
+    );
+  }
+  if (!hasLastApiCallAt) {
+    db.exec(
+      `ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_api_call_at INTEGER`,
     );
   }
 }
