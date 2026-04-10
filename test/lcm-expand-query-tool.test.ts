@@ -85,6 +85,7 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
       delegationTimeoutMs: 120000,
       timezone: "UTC",
       pruneHeartbeatOk: false,
+      transcriptGcEnabled: false,
       summaryMaxOverageFactor: 3,
     },
     complete: vi.fn(),

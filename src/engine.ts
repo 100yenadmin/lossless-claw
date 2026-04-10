@@ -1291,6 +1291,20 @@ export class LcmContextEngine implements ContextEngine {
         "[lcm] FTS5 unavailable in the current Node runtime; full_text search will fall back to LIKE and indexing is disabled",
       );
     }
+    if (this.config.ignoreSessionPatterns.length > 0) {
+      logStartupBannerOnce({
+        key: "ignore-session-patterns",
+        log: (message) => this.deps.log.info(message),
+        message: `[lcm] Ignoring sessions matching ${this.config.ignoreSessionPatterns.length} pattern(s): ${this.config.ignoreSessionPatterns.join(", ")}`,
+      });
+    }
+    if (this.config.skipStatelessSessions && this.config.statelessSessionPatterns.length > 0) {
+      logStartupBannerOnce({
+        key: "stateless-session-patterns",
+        log: (message) => this.deps.log.info(message),
+        message: `[lcm] Stateless session patterns: ${this.config.statelessSessionPatterns.length} pattern(s): ${this.config.statelessSessionPatterns.join(", ")}`,
+      });
+    }
     this.assembler = new ContextAssembler(
       this.conversationStore,
       this.summaryStore,

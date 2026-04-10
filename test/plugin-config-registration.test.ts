@@ -542,6 +542,8 @@ describe("lcm plugin registration", () => {
         "[lcm] Plugin loaded (enabled=true, db=",
         "[lcm] Transcript GC ",
         "[lcm] Compaction summarization model:",
+        "[lcm] Ignoring sessions matching",
+        "[lcm] Stateless session patterns:",
       ].some((prefix) => message.startsWith(prefix)),
     );
 
@@ -549,6 +551,8 @@ describe("lcm plugin registration", () => {
       `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33)`,
       "[lcm] Transcript GC disabled (default false)",
       "[lcm] Compaction summarization model: (unconfigured)",
+      "[lcm] Ignoring sessions matching 2 pattern(s): agent:*:cron:**, agent:main:subagent:**",
+      "[lcm] Stateless session patterns: 1 pattern(s): agent:*:subagent:**",
     ].sort());
     expect(firstSessionMessages).toEqual([]);
     expect(secondSessionMessages).toEqual([]);
