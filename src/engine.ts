@@ -1800,6 +1800,7 @@ export class LcmContextEngine implements ContextEngine {
       turnsSinceLeafCompaction,
       tokensAccumulatedSinceLeafCompaction,
       lastActivityBand,
+      lastApiCallAt: Date.now(),
     });
     const updated = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
       params.conversationId,
@@ -1950,56 +1951,6 @@ export class LcmContextEngine implements ContextEngine {
       });
     }
 
-    if (
-      cacheState === "hot"
-      && this.isComfortablyUnderTokenBudget({
-        currentTokenCount: params.currentTokenCount,
-        tokenBudget: params.tokenBudget,
-      })
-    ) {
-      return this.logIncrementalCompactionDecision({
-        conversationId: params.conversationId,
-        cacheState,
-        activityBand,
-        triggerLeafChunkTokens,
-        preferredLeafChunkTokens,
-        fallbackLeafChunkTokens,
-        rawTokensOutsideTail: leafTrigger.rawTokensOutsideTail,
-        threshold: leafTrigger.threshold,
-        shouldCompact: false,
-        maxPasses: 1,
-        allowCondensedPasses: false,
-        reason: "hot-cache-budget-headroom",
-      });
-    }
-
-    if (
-      cacheState === "hot"
-      && leafTrigger.rawTokensOutsideTail
-        < Math.floor(
-          leafTrigger.threshold * this.config.cacheAwareCompaction.hotCachePressureFactor,
-        )
-    ) {
-      return this.logIncrementalCompactionDecision({
-        conversationId: params.conversationId,
-        cacheState,
-        activityBand,
-        triggerLeafChunkTokens,
-        preferredLeafChunkTokens,
-        fallbackLeafChunkTokens,
-        rawTokensOutsideTail: leafTrigger.rawTokensOutsideTail,
-        threshold: leafTrigger.threshold,
-        shouldCompact: false,
-        maxPasses: 1,
-        allowCondensedPasses: false,
-        reason: "hot-cache-defer",
-      });
-    }
-
-    const maxPasses =
-      cacheState === "cold"
-        ? Math.max(1, this.config.cacheAwareCompaction.maxColdCacheCatchupPasses)
-        : 1;
     return this.logIncrementalCompactionDecision({
       conversationId: params.conversationId,
       cacheState,
@@ -2010,9 +1961,9 @@ export class LcmContextEngine implements ContextEngine {
       rawTokensOutsideTail: leafTrigger.rawTokensOutsideTail,
       threshold: leafTrigger.threshold,
       shouldCompact: true,
-      maxPasses,
-      allowCondensedPasses: cacheState !== "hot",
-      reason: cacheState === "cold" ? "cold-cache-catchup" : "leaf-trigger",
+      maxPasses: 1,
+      allowCondensedPasses: false,
+      reason: "leaf-trigger",
     });
   }
 
@@ -3549,6 +3500,49 @@ export class LcmContextEngine implements ContextEngine {
           messages: params.messages,
           estimatedTokens: 0,
         };
+      }
+
+      // Pre-assembly cache-TTL compaction: if the cache has expired since the
+      // last API call, compact before assembling so stale context is evicted.
+      try {
+        const cacheTTLMs = (this.config.cacheAwareCompaction.cacheTTLSeconds ?? 300) * 1000;
+        const telemetry = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
+          conversation.conversationId,
+        );
+        if (telemetry?.lastApiCallAt) {
+          const idleMs = Date.now() - telemetry.lastApiCallAt;
+          if (idleMs > cacheTTLMs) {
+            const leafTrigger = await this.compaction.evaluateLeafTrigger(
+              conversation.conversationId,
+              this.config.leafChunkTokens,
+            );
+            if (leafTrigger.shouldCompact) {
+              this.deps.log.info(
+                `[lcm] assemble: pre-assembly compaction — cache expired (idle ${idleMs}ms), compacting before assembly`,
+              );
+              const tokenBudget = this.applyAssemblyBudgetCap(
+                typeof params.tokenBudget === "number" &&
+                Number.isFinite(params.tokenBudget) &&
+                params.tokenBudget > 0
+                  ? Math.floor(params.tokenBudget)
+                  : 128_000,
+              );
+              await this.compactLeafAsync({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                sessionFile: "",
+                tokenBudget,
+                maxPasses: 1,
+                leafChunkTokens: this.config.leafChunkTokens,
+                allowCondensedPasses: true,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        this.deps.log.warn(
+          `[lcm] assemble: pre-assembly compaction failed: ${describeLogError(err)}`,
+        );
       }
 
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);

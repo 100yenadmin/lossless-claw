@@ -6,6 +6,7 @@ export type CacheAwareCompactionConfig = {
   maxColdCacheCatchupPasses: number;
   hotCachePressureFactor: number;
   hotCacheBudgetHeadroomRatio: number;
+  cacheTTLSeconds: number;
 };
 
 export type DynamicLeafChunkTokensConfig = {
@@ -350,6 +351,12 @@ export function resolveLcmConfig(
           ?? 2,
       hotCachePressureFactor: resolvedHotCachePressureFactor,
       hotCacheBudgetHeadroomRatio: resolvedHotCacheBudgetHeadroomRatio,
+      cacheTTLSeconds: Math.max(
+        0,
+        parseFiniteInt(env.LCM_CACHE_TTL_SECONDS)
+          ?? toNumber(cacheAwareCompaction?.cacheTTLSeconds)
+          ?? 300,
+      ),
     },
     dynamicLeafChunkTokens: {
       enabled:

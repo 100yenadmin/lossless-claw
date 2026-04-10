@@ -27,6 +27,7 @@ describe("resolveLcmConfig", () => {
     expect(config.pruneHeartbeatOk).toBe(false);
     expect(config.cacheAwareCompaction).toEqual({
       enabled: true,
+      cacheTTLSeconds: 300,
       maxColdCacheCatchupPasses: 2,
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
@@ -79,6 +80,7 @@ describe("resolveLcmConfig", () => {
     expect(config.pruneHeartbeatOk).toBe(true);
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 300,
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
@@ -142,6 +144,7 @@ describe("resolveLcmConfig", () => {
     expect(config.incrementalMaxDepth).toBe(3); // env wins
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 300,
       maxColdCacheCatchupPasses: 4,
       hotCachePressureFactor: 5.5,
       hotCacheBudgetHeadroomRatio: 0.25,
@@ -265,6 +268,7 @@ describe("resolveLcmConfig", () => {
 
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 300,
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
