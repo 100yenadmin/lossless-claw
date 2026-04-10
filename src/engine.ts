@@ -3459,6 +3459,8 @@ export class LcmContextEngine implements ContextEngine {
 
     let ingestBatch: AgentMessage[] = [];
     let ingestError: unknown = null;
+    let newMessageCount = 0;
+    let dedupedNewMessageCount = 0;
     await this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
       async () => {
@@ -3466,11 +3468,13 @@ export class LcmContextEngine implements ContextEngine {
         // full history. Run on newMessages BEFORE prepending autoCompactionSummary
         // so synthetic summaries cannot interfere with replay detection.
         const newMessages = params.messages.slice(params.prePromptMessageCount);
+        newMessageCount = newMessages.length;
         const dedupedNewMessages = await this.deduplicateAfterTurnBatch(
           params.sessionId,
           params.sessionKey,
           newMessages,
         );
+        dedupedNewMessageCount = dedupedNewMessages.length;
 
         const nextIngestBatch: AgentMessage[] = [];
         if (params.autoCompactionSummary) {
@@ -3516,7 +3520,7 @@ export class LcmContextEngine implements ContextEngine {
 
     if (ingestBatch.length === 0) {
       this.deps.log.info(
-        `[lcm] afterTurn: nothing to ingest ${sessionLabel} newMessages=${newMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] afterTurn: nothing to ingest ${sessionLabel} newMessages=${newMessageCount} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       return;
     }
@@ -3647,7 +3651,7 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     this.deps.log.info(
-      `[lcm] afterTurn: done conversation=${conversation.conversationId} ${sessionLabel} newMessages=${newMessages.length} dedupedMessages=${dedupedNewMessages.length} ingestedMessages=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+      `[lcm] afterTurn: done conversation=${conversation.conversationId} ${sessionLabel} newMessages=${newMessageCount} dedupedMessages=${dedupedNewMessageCount} ingestedMessages=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
     );
   }
 
