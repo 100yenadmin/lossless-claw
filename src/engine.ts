@@ -5247,16 +5247,25 @@ export class LcmContextEngine implements ContextEngine {
           }
 
           const archivedMessageCount = await this.conversationStore.getMessageCount(current.conversationId);
-          const sessionFileStats = statSync(params.sessionFile);
-          const tailEntryRaw = readLastJsonlEntryBeforeOffset(
-            params.sessionFile,
-            sessionFileStats.size,
-            true,
-          );
-          const tailEntryMessage = readBootstrapMessageFromJsonLine(tailEntryRaw);
-          const tailEntryHash = tailEntryMessage
-            ? createBootstrapEntryHash(toStoredMessage(tailEntryMessage))
-            : null;
+          let sessionFileStats: ReturnType<typeof statSync>;
+          let tailEntryHash: string | null;
+          try {
+            sessionFileStats = statSync(params.sessionFile);
+            const tailEntryRaw = readLastJsonlEntryBeforeOffset(
+              params.sessionFile,
+              sessionFileStats.size,
+              true,
+            );
+            const tailEntryMessage = readBootstrapMessageFromJsonLine(tailEntryRaw);
+            tailEntryHash = tailEntryMessage
+              ? createBootstrapEntryHash(toStoredMessage(tailEntryMessage))
+              : null;
+          } catch (error) {
+            return {
+              kind: "unavailable",
+              reason: `Lossless Claw could not read the current session transcript: ${describeLogError(error)}`,
+            };
+          }
 
           await this.conversationStore.archiveConversation(current.conversationId);
           const freshConversation = await this.conversationStore.createConversation({

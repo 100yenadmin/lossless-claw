@@ -118,7 +118,7 @@ function createTestDeps(
     },
     resolveAgentDir: () => process.env.HOME ?? tmpdir(),
     resolveSessionIdFromSessionKey: async () => undefined,
-    resolveSessionTranscriptFile: async ({ sessionId }: { sessionId: string }) => sessionId,
+    resolveSessionTranscriptFile: async () => undefined,
     agentLaneSubagent: "subagent",
     log: {
       info: vi.fn(),
@@ -260,6 +260,7 @@ async function ingestAndReadStoredContent(params: {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   closeLcmConnection();
   resetDelegatedExpansionGrantsForTests();
   for (const dir of tempDirs.splice(0)) {
@@ -2747,6 +2748,33 @@ describe("LcmContextEngine.bootstrap", () => {
       limit: 5,
     });
     expect(searchResults.some((result) => result.conversationId === original!.conversationId)).toBe(true);
+  });
+
+  it("reports rotate as unavailable when the session transcript cannot be read", async () => {
+    const engine = createEngine();
+
+    const conversation = await engine.getConversationStore().createConversation({
+      sessionId: "rotate-unreadable-session",
+      sessionKey: "agent:main:main",
+    });
+    await engine.getConversationStore().createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "seed",
+        tokenCount: 1,
+      },
+    ]);
+
+    const result = await engine.rotateSessionStorage({
+      sessionId: "rotate-unreadable-session",
+      sessionKey: "agent:main:main",
+      sessionFile: join(tmpdir(), `missing-rotate-transcript-${Date.now()}.jsonl`),
+    });
+
+    expect(result.kind).toBe("unavailable");
+    expect(result.reason).toContain("could not read the current session transcript");
   });
 
   it("reconciles missing tail messages when JSONL advanced past LCM", async () => {

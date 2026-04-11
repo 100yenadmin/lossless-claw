@@ -9,6 +9,7 @@ import type { LcmDependencies } from "../types.js";
 import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "openclaw/plugin-sdk";
 import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
 import { createLcmDatabaseBackup } from "./lcm-db-backup.js";
+import { describeLogError } from "../lcm-log.js";
 import {
   applyDoctorCleaners,
   getDoctorCleanerApplyUnavailableReason,
@@ -131,6 +132,11 @@ function buildSection(title: string, lines: string[]): string {
 
 function buildStatLine(label: string, value: string): string {
   return `${label}: ${value}`;
+}
+
+function formatFailureReason(error: unknown): string {
+  const message = describeLogError(error).trim();
+  return message || "Unknown error";
 }
 
 function formatCompressionRatio(contextTokens: number, compressedTokens: number): string {
@@ -864,10 +870,21 @@ async function buildBackupText(params: {
     return lines.join("\n");
   }
 
-  const backupPath = createLcmDatabaseBackup(params.db, {
-    databasePath: params.config.databasePath,
-    label: "backup",
-  });
+  let backupPath: string | null;
+  try {
+    backupPath = createLcmDatabaseBackup(params.db, {
+      databasePath: params.config.databasePath,
+      label: "backup",
+    });
+  } catch (error) {
+    lines.push(
+      buildSection("🛠️ Backup", [
+        buildStatLine("status", "failed"),
+        buildStatLine("reason", formatFailureReason(error)),
+      ]),
+    );
+    return lines.join("\n");
+  }
   if (!backupPath) {
     lines.push(
       buildSection("🛠️ Backup", [
@@ -969,10 +986,30 @@ async function buildRotateText(params: {
     return lines.join("\n");
   }
 
-  const backupPath = createLcmDatabaseBackup(params.db, {
-    databasePath: params.config.databasePath,
-    label: "rotate",
-  });
+  lines.push(
+    buildSection("📍 Current conversation", [
+      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+      buildStatLine("session key", formatCommand(truncateMiddle(sessionKey, 44))),
+      buildStatLine("messages", formatNumber(current.stats.messageCount)),
+    ]),
+    "",
+  );
+
+  let backupPath: string | null;
+  try {
+    backupPath = createLcmDatabaseBackup(params.db, {
+      databasePath: params.config.databasePath,
+      label: "rotate",
+    });
+  } catch (error) {
+    lines.push(
+      buildSection("💾 Backup", [
+        buildStatLine("status", "failed"),
+        buildStatLine("reason", formatFailureReason(error)),
+      ]),
+    );
+    return lines.join("\n");
+  }
   if (!backupPath) {
     lines.push(
       buildSection("🛠️ Rotate", [
@@ -983,25 +1020,30 @@ async function buildRotateText(params: {
     return lines.join("\n");
   }
 
-  const result = await (await params.getLcm()).rotateSessionStorage({
-    sessionId,
-    sessionKey,
-    sessionFile: transcriptPath,
-  });
-
   lines.push(
-    buildSection("📍 Current conversation", [
-      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
-      buildStatLine("session key", formatCommand(truncateMiddle(sessionKey, 44))),
-      buildStatLine("messages", formatNumber(current.stats.messageCount)),
-    ]),
-    "",
     buildSection("💾 Backup", [
       buildStatLine("status", "created"),
       buildStatLine("backup path", backupPath),
     ]),
     "",
   );
+
+  let result: RotateSessionStorageResult;
+  try {
+    result = await (await params.getLcm()).rotateSessionStorage({
+      sessionId,
+      sessionKey,
+      sessionFile: transcriptPath,
+    });
+  } catch (error) {
+    lines.push(
+      buildSection("🛠️ Rotate", [
+        buildStatLine("status", "failed"),
+        buildStatLine("reason", formatFailureReason(error)),
+      ]),
+    );
+    return lines.join("\n");
+  }
 
   if (result.kind === "unavailable") {
     lines.push(

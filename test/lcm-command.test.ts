@@ -70,6 +70,7 @@ describe("lcm command", () => {
   const dbPaths = new Set<string>();
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const dbPath of dbPaths) {
       closeLcmConnection(dbPath);
     }
@@ -1123,6 +1124,21 @@ describe("lcm command", () => {
     expect(existsSync(backupPath!)).toBe(true);
   });
 
+  it("reports backup failure with structured output", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+    vi.spyOn(fixture.db, "exec").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    const result = await fixture.command.handler(createCommandContext("backup"));
+
+    expect(result.text).toContain("💾 Lossless Claw Backup");
+    expect(result.text).toContain("status: failed");
+    expect(result.text).toContain("reason: disk full");
+  });
+
   it("rotates the current session with backup-first storage splitting", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
@@ -1183,6 +1199,111 @@ describe("lcm command", () => {
       sessionKey: "agent:main:main",
       sessionFile: transcriptPath,
     });
+  });
+
+  it("reports rotate failure when the pre-rotate backup throws", async () => {
+    const transcriptPath = join(tmpdir(), `lossless-claw-rotate-backup-fail-${Date.now()}.jsonl`);
+    writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
+    tempDirs.add(transcriptPath);
+
+    const rotateSessionStorage = vi.fn(async () => ({
+      kind: "rotated" as const,
+      archivedConversationId: 7,
+      activeConversationId: 8,
+      archivedMessageCount: 42,
+      checkpointSize: 1234,
+    }));
+    const deps = {
+      resolveSessionTranscriptFile: vi.fn(async () => transcriptPath),
+    } as unknown as LcmDependencies;
+    const fixture = createCommandFixture({
+      deps,
+      getLcm: async () => ({
+        rotateSessionStorage,
+      }),
+    });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+    vi.spyOn(fixture.db, "exec").mockImplementation(() => {
+      throw new Error("SQLITE_BUSY");
+    });
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "rotate-backup-failure-session",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "first message",
+        tokenCount: 2,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("rotate", {
+        sessionId: "rotate-backup-failure-session",
+        sessionKey: "agent:main:main",
+      }),
+    );
+
+    expect(result.text).toContain("🪓 Lossless Claw Rotate");
+    expect(result.text).toContain("conversation id:");
+    expect(result.text).toContain("status: failed");
+    expect(result.text).toContain("reason: SQLITE_BUSY");
+    expect(rotateSessionStorage).not.toHaveBeenCalled();
+  });
+
+  it("reports rotate failure when the engine rotate call throws", async () => {
+    const transcriptPath = join(tmpdir(), `lossless-claw-rotate-engine-fail-${Date.now()}.jsonl`);
+    writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
+    tempDirs.add(transcriptPath);
+
+    const rotateSessionStorage = vi.fn(async () => {
+      throw new Error("rotate exploded");
+    });
+    const deps = {
+      resolveSessionTranscriptFile: vi.fn(async () => transcriptPath),
+    } as unknown as LcmDependencies;
+    const fixture = createCommandFixture({
+      deps,
+      getLcm: async () => ({
+        rotateSessionStorage,
+      }),
+    });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "rotate-engine-failure-session",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "first message",
+        tokenCount: 2,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("rotate", {
+        sessionId: "rotate-engine-failure-session",
+        sessionKey: "agent:main:main",
+      }),
+    );
+
+    const backupPath = result.text.match(/backup path: (.+)/)?.[1]?.trim();
+    expect(result.text).toContain("🪓 Lossless Claw Rotate");
+    expect(result.text).toContain("status: created");
+    expect(result.text).toContain("status: failed");
+    expect(result.text).toContain("reason: rotate exploded");
+    expect(backupPath).toBeTruthy();
+    expect(existsSync(backupPath!)).toBe(true);
   });
 
   it("reports rotate as unavailable when OpenClaw does not expose a session key", async () => {
