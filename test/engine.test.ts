@@ -2206,7 +2206,7 @@ describe("LcmContextEngine.bootstrap", () => {
     });
   });
 
-  it("purges stale conversation data and re-bootstraps when the session file rotates", async () => {
+  it("preserves existing conversation data when the session file rotates", async () => {
     const firstSessionFile = createSessionFilePath("rotation-old");
     const firstManager = SessionManager.open(firstSessionFile);
     firstManager.appendMessage({
@@ -2243,6 +2243,14 @@ describe("LcmContextEngine.bootstrap", () => {
     const rotatedManager = SessionManager.open(rotatedSessionFile);
     rotatedManager.appendMessage({
       role: "user",
+      content: [{ type: "text", text: "old user" }],
+    } as AgentMessage);
+    rotatedManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "old assistant" }],
+    } as AgentMessage);
+    rotatedManager.appendMessage({
+      role: "user",
       content: [{ type: "text", text: "new user" }],
     } as AgentMessage);
     rotatedManager.appendMessage({
@@ -2254,23 +2262,29 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(second).toEqual({
       bootstrapped: true,
       importedMessages: 2,
+      reason: "reconciled missing session messages",
     });
 
     const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
-    expect(stored.map((message) => message.content)).toEqual(["new user", "new assistant"]);
+    expect(stored.map((message) => message.content)).toEqual([
+      "old user",
+      "old assistant",
+      "new user",
+      "new assistant",
+    ]);
 
     const contextItems = await engine.getSummaryStore().getContextItems(conversation!.conversationId);
-    expect(contextItems).toHaveLength(2);
-    expect(contextItems.every((item) => item.itemType === "message")).toBe(true);
+    expect(contextItems.some((item) => item.itemType === "summary")).toBe(true);
+    expect(contextItems.filter((item) => item.itemType === "message")).toHaveLength(4);
 
     const rotatedBootstrapState = await engine
       .getSummaryStore()
       .getConversationBootstrapState(conversation!.conversationId);
     expect(rotatedBootstrapState?.sessionFilePath).toBe(rotatedSessionFile);
-    expect(await engine.getSummaryStore().getSummary("sum_rotation_old")).toBeNull();
+    expect(await engine.getSummaryStore().getSummary("sum_rotation_old")).not.toBeNull();
   });
 
-  it("purges stale conversation data when the session file rotates across a stable sessionKey", async () => {
+  it("preserves conversation history when the session file rotates across a stable sessionKey", async () => {
     const engine = createEngine();
     const firstSessionId = "bootstrap-rotation-session-key-1";
     const secondSessionId = "bootstrap-rotation-session-key-2";
@@ -2317,6 +2331,14 @@ describe("LcmContextEngine.bootstrap", () => {
     const rotatedManager = SessionManager.open(rotatedSessionFile);
     rotatedManager.appendMessage({
       role: "user",
+      content: [{ type: "text", text: "old keyed user" }],
+    } as AgentMessage);
+    rotatedManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "old keyed assistant" }],
+    } as AgentMessage);
+    rotatedManager.appendMessage({
+      role: "user",
       content: [{ type: "text", text: "new keyed user" }],
     } as AgentMessage);
     rotatedManager.appendMessage({
@@ -2332,6 +2354,7 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(second).toEqual({
       bootstrapped: true,
       importedMessages: 2,
+      reason: "reconciled missing session messages",
     });
 
     const conversation = await engine.getConversationStore().getConversationForSession({
@@ -2343,17 +2366,96 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(conversation!.sessionId).toBe(secondSessionId);
 
     const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
-    expect(stored.map((message) => message.content)).toEqual(["new keyed user", "new keyed assistant"]);
+    expect(stored.map((message) => message.content)).toEqual([
+      "old keyed user",
+      "old keyed assistant",
+      "new keyed user",
+      "new keyed assistant",
+    ]);
 
     const contextItems = await engine.getSummaryStore().getContextItems(conversation!.conversationId);
-    expect(contextItems).toHaveLength(2);
-    expect(contextItems.every((item) => item.itemType === "message")).toBe(true);
+    expect(contextItems.some((item) => item.itemType === "summary")).toBe(true);
+    expect(contextItems.filter((item) => item.itemType === "message")).toHaveLength(4);
 
     const rotatedBootstrapState = await engine
       .getSummaryStore()
       .getConversationBootstrapState(conversation!.conversationId);
     expect(rotatedBootstrapState?.sessionFilePath).toBe(rotatedSessionFile);
-    expect(await engine.getSummaryStore().getSummary("sum_rotation_session_key_old")).toBeNull();
+    expect(await engine.getSummaryStore().getSummary("sum_rotation_session_key_old")).not.toBeNull();
+  });
+
+  it("does not reapply bootstrapMaxTokens after session file rotation", async () => {
+    const engine = createEngineWithConfig({ bootstrapMaxTokens: 250 });
+    const firstSessionId = "bootstrap-rotation-full-reseed-1";
+    const secondSessionId = "bootstrap-rotation-full-reseed-2";
+    const sessionKey = "agent:main:test:bootstrap-rotation-full-reseed";
+    const firstSessionFile = createSessionFilePath("rotation-full-reseed-old");
+    const firstManager = SessionManager.open(firstSessionFile);
+    firstManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "old seed user" }],
+    } as AgentMessage);
+    firstManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "old seed assistant" }],
+    } as AgentMessage);
+
+    const first = await engine.bootstrap({
+      sessionId: firstSessionId,
+      sessionKey,
+      sessionFile: firstSessionFile,
+    });
+    expect(first).toEqual({
+      bootstrapped: true,
+      importedMessages: 2,
+    });
+
+    const rotatedSessionFile = createSessionFilePath("rotation-full-reseed-new");
+    const rotatedManager = SessionManager.open(rotatedSessionFile);
+    const originalMessages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "old seed user" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "old seed assistant" }],
+      },
+    ] as AgentMessage[];
+    for (const message of originalMessages) {
+      rotatedManager.appendMessage(message);
+    }
+    const rotatedMessages = Array.from({ length: 5 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `rotated turn ${index} ${"x".repeat(396)}` }],
+    })) as AgentMessage[];
+    for (const message of rotatedMessages) {
+      rotatedManager.appendMessage(message);
+    }
+
+    const second = await engine.bootstrap({
+      sessionId: secondSessionId,
+      sessionKey,
+      sessionFile: rotatedSessionFile,
+    });
+    expect(second).toEqual({
+      bootstrapped: true,
+      importedMessages: 5,
+      reason: "reconciled missing session messages",
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId: secondSessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual(
+      [...originalMessages, ...rotatedMessages].map(
+        (message) => (message.content[0] as { text: string }).text,
+      ),
+    );
   });
 
   it("reconciles missing tail messages when JSONL advanced past LCM", async () => {

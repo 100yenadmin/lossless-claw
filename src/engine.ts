@@ -1004,13 +1004,6 @@ function resolveBootstrapMaxTokens(config: Pick<LcmConfig, "bootstrapMaxTokens" 
   return Math.max(6000, Math.floor(leafChunkTokens * 0.3));
 }
 
-function hasTable(db: DatabaseSync, tableName: string): boolean {
-  const row = db
-    .prepare(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`)
-    .get(tableName) as { present?: number } | undefined;
-  return row?.present === 1;
-}
-
 /**
  * Keep only the newest bootstrap messages that fit within the token budget.
  *
@@ -2624,62 +2617,6 @@ export class LcmContextEngine implements ContextEngine {
     });
   }
 
-  private purgeConversationForBootstrapRotation(conversationId: number): void {
-    this.db.prepare(`DELETE FROM context_items WHERE conversation_id = ?`).run(conversationId);
-    this.db
-      .prepare(
-        `DELETE FROM summary_messages
-         WHERE summary_id IN (SELECT summary_id FROM summaries WHERE conversation_id = ?)`,
-      )
-      .run(conversationId);
-    this.db
-      .prepare(
-        `DELETE FROM summary_parents
-         WHERE summary_id IN (SELECT summary_id FROM summaries WHERE conversation_id = ?)
-            OR parent_summary_id IN (SELECT summary_id FROM summaries WHERE conversation_id = ?)`,
-      )
-      .run(conversationId, conversationId);
-    if (hasTable(this.db, "summaries_fts")) {
-      this.db
-        .prepare(
-          `DELETE FROM summaries_fts
-           WHERE summary_id IN (SELECT summary_id FROM summaries WHERE conversation_id = ?)`,
-        )
-        .run(conversationId);
-    }
-    if (hasTable(this.db, "summaries_fts_cjk")) {
-      this.db
-        .prepare(
-          `DELETE FROM summaries_fts_cjk
-           WHERE summary_id IN (SELECT summary_id FROM summaries WHERE conversation_id = ?)`,
-        )
-        .run(conversationId);
-    }
-    this.db.prepare(`DELETE FROM summaries WHERE conversation_id = ?`).run(conversationId);
-    this.db.prepare(`DELETE FROM large_files WHERE conversation_id = ?`).run(conversationId);
-    this.db.prepare(`DELETE FROM conversation_bootstrap_state WHERE conversation_id = ?`).run(conversationId);
-    this.db
-      .prepare(`DELETE FROM conversation_compaction_telemetry WHERE conversation_id = ?`)
-      .run(conversationId);
-    if (hasTable(this.db, "messages_fts")) {
-      this.db
-        .prepare(
-          `DELETE FROM messages_fts
-           WHERE rowid IN (SELECT message_id FROM messages WHERE conversation_id = ?)`,
-        )
-        .run(conversationId);
-    }
-    this.db.prepare(`DELETE FROM messages WHERE conversation_id = ?`).run(conversationId);
-    this.db
-      .prepare(
-        `UPDATE conversations
-         SET bootstrapped_at = NULL,
-             updated_at = datetime('now')
-         WHERE conversation_id = ?`,
-      )
-      .run(conversationId);
-  }
-
   async bootstrap(params: {
     sessionId: string;
     sessionFile: string;
@@ -2743,10 +2680,7 @@ export class LcmContextEngine implements ContextEngine {
             this.deps.log.warn(
               `[lcm] bootstrap: session file rotated conversation=${conversationId} ${sessionLabel} oldFile=${bootstrapState.sessionFilePath} newFile=${params.sessionFile}`,
             );
-            this.purgeConversationForBootstrapRotation(conversationId);
             bootstrapState = null;
-            existingCount = 0;
-            conversation.bootstrappedAt = null;
           }
 
           // If the transcript file is byte-for-byte unchanged from the last
