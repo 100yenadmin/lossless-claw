@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { closeLcmConnection, getLcmConnection } from "../src/db/connection.js";
 import * as features from "../src/db/features.js";
 import { runLcmMigrations } from "../src/db/migration.js";
+import { buildMessageIdentityHash } from "../src/store/message-identity.js";
 
 const tempDirs: string[] = [];
 
@@ -279,6 +280,71 @@ describe("runLcmMigrations summary depth backfill", () => {
         .prepare(`INSERT INTO conversations (session_id, session_key, active) VALUES (?, ?, 1)`)
         .run("duplicate-active-session", "agent:main:main"),
     ).toThrow();
+  });
+
+  it("backfills message identity hashes and indexes conversation hash lookups", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "identity-hash.db");
+    const db = getLcmConnection(dbPath);
+
+    db.exec(`
+      CREATE TABLE conversations (
+        conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        title TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE messages (
+        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
+        content TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (conversation_id, seq)
+      );
+    `);
+
+    db.prepare(`INSERT INTO conversations (conversation_id, session_id) VALUES (?, ?)`).run(
+      1,
+      "identity-hash-session",
+    );
+    db.prepare(
+      `INSERT INTO messages (conversation_id, seq, role, content, token_count)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(1, 1, "assistant", "hello from hash backfill", 5);
+
+    runLcmMigrations(db, { fts5Available: false });
+
+    const messageColumns = db.prepare(`PRAGMA table_info(messages)`).all() as Array<{
+      name?: string;
+    }>;
+    expect(messageColumns.some((column) => column.name === "identity_hash")).toBe(true);
+
+    const row = db
+      .prepare(`SELECT identity_hash FROM messages WHERE conversation_id = ? AND seq = ?`)
+      .get(1, 1) as { identity_hash: string | null };
+    expect(row.identity_hash).toBe(
+      buildMessageIdentityHash("assistant", "hello from hash backfill"),
+    );
+
+    const planRows = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT role, content
+         FROM messages
+         WHERE conversation_id = ? AND identity_hash = ?`,
+      )
+      .all(1, row.identity_hash) as Array<{ detail?: string }>;
+    expect(
+      planRows.some((planRow) =>
+        (planRow.detail ?? "").includes("messages_conv_identity_hash_idx"),
+      ),
+    ).toBe(true);
   });
 
   it("skips FTS tables when fts5 is unavailable", () => {

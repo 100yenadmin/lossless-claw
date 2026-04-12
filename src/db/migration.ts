@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { getLcmDbFeatures } from "./features.js";
+import { buildMessageIdentityHash } from "../store/message-identity.js";
 import { parseUtcTimestampOrNull } from "../store/parse-utc-timestamp.js";
 
 type MigrationLogger = {
@@ -33,6 +34,12 @@ type SummaryParentEdgeRow = {
 
 type TableNameRow = {
   name?: string;
+};
+
+type MessageIdentityBackfillRow = {
+  message_id: number;
+  role: string;
+  content: string;
 };
 
 type FtsTableSpec = {
@@ -120,6 +127,35 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
     db.exec(
       `ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_activity_band TEXT NOT NULL DEFAULT 'low' CHECK (last_activity_band IN ('low', 'medium', 'high'))`,
     );
+  }
+}
+
+function ensureMessageIdentityHashColumn(db: DatabaseSync): void {
+  const messageColumns = db.prepare(`PRAGMA table_info(messages)`).all() as SummaryColumnInfo[];
+  const hasIdentityHash = messageColumns.some((col) => col.name === "identity_hash");
+  if (!hasIdentityHash) {
+    db.exec(`ALTER TABLE messages ADD COLUMN identity_hash TEXT`);
+  }
+}
+
+function backfillMessageIdentityHashes(db: DatabaseSync): void {
+  const selectStmt = db.prepare(
+    `SELECT message_id, role, content
+     FROM messages
+     WHERE identity_hash IS NULL OR identity_hash = ''
+     ORDER BY message_id
+     LIMIT ?`,
+  );
+  const updateStmt = db.prepare(`UPDATE messages SET identity_hash = ? WHERE message_id = ?`);
+
+  while (true) {
+    const rows = selectStmt.all(1_000) as MessageIdentityBackfillRow[];
+    if (rows.length === 0) {
+      return;
+    }
+    for (const row of rows) {
+      updateStmt.run(buildMessageIdentityHash(row.role, row.content), row.message_id);
+    }
   }
 }
 
@@ -586,6 +622,7 @@ export function runLcmMigrations(
       role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
       content TEXT NOT NULL,
       token_count INTEGER NOT NULL,
+      identity_hash TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (conversation_id, seq)
     );
@@ -768,6 +805,17 @@ export function runLcmMigrations(
     ensureSummaryMetadataColumns(db),
   );
   runMigrationStep("ensureSummaryModelColumn", log, () => ensureSummaryModelColumn(db));
+  runMigrationStep("ensureMessageIdentityHashColumn", log, () =>
+    ensureMessageIdentityHashColumn(db),
+  );
+  runMigrationStep("backfillMessageIdentityHashes", log, () =>
+    backfillMessageIdentityHashes(db),
+  );
+  runMigrationStep("createMessagesIdentityHashIndex", log, () =>
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS messages_conv_identity_hash_idx ON messages (conversation_id, identity_hash)`,
+    ),
+  );
   runMigrationStep("ensureCompactionTelemetryColumns", log, () =>
     ensureCompactionTelemetryColumns(db),
   );
