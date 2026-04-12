@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { join } from "node:path";
@@ -3550,20 +3550,22 @@ export class LcmContextEngine implements ContextEngine {
                   tokenCount: latestDbMessage.tokenCount,
                 })
               : null;
+            const frontierHash = latestDbHash ?? bootstrapState.lastProcessedEntryHash;
             // Short-circuit before the expensive backward scan: the fast-path can
-            // only succeed when the DB's latest hash still matches the checkpoint.
-            // When messages have been ingested since the last bootstrap this check
-            // fails and we skip straight to the async full-read slow path below,
-            // avoiding a backward scan that could never find a matching tail entry.
+            // only succeed when the current frontier still matches the checkpoint.
+            // A freshly rotated row may have no DB messages yet, so in that case
+            // the stored checkpoint hash acts as the frontier anchor. When the
+            // frontier no longer matches, skip straight to the async full-read
+            // slow path below and avoid a backward scan that cannot succeed.
             const canTryAppendOnlyFastPath =
-              latestDbHash !== null && latestDbHash === bootstrapState.lastProcessedEntryHash;
+              frontierHash !== null && frontierHash === bootstrapState.lastProcessedEntryHash;
 
             const tailEntryRaw = canTryAppendOnlyFastPath
               ? await readLastJsonlEntryBeforeOffset(
                   params.sessionFile,
                   bootstrapState.lastProcessedOffset,
                   true,
-                  (message) => createBootstrapEntryHash(toStoredMessage(message)) === latestDbHash,
+                  (message) => createBootstrapEntryHash(toStoredMessage(message)) === frontierHash,
                 )
               : null;
             const tailEntryMessage = readBootstrapMessageFromJsonLine(tailEntryRaw);
@@ -5251,7 +5253,7 @@ export class LcmContextEngine implements ContextEngine {
           let tailEntryHash: string | null;
           try {
             sessionFileStats = statSync(params.sessionFile);
-            const tailEntryRaw = readLastJsonlEntryBeforeOffset(
+            const tailEntryRaw = await readLastJsonlEntryBeforeOffset(
               params.sessionFile,
               sessionFileStats.size,
               true,
