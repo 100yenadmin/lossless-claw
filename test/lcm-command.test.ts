@@ -1139,7 +1139,7 @@ describe("lcm command", () => {
     expect(result.text).toContain("reason: disk full");
   });
 
-  it("rotates the current session without taking an automatic backup", async () => {
+  it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
     tempDirs.add(transcriptPath);
@@ -1184,18 +1184,88 @@ describe("lcm command", () => {
       }),
     );
 
+    const backupPath = result.text.match(/backup path: (.+)/)?.[1]?.trim();
+
     expect(result.text).toContain("🪓 Lossless Claw Rotate");
+    expect(result.text).toContain("status: replaced latest");
     expect(result.text).toContain("status: rotated");
     expect(result.text).toContain("archived conversation id: 7");
     expect(result.text).toContain("new active conversation id: 8");
     expect(result.text).toContain("archived message count: 42");
     expect(result.text).toContain("mode: start from now forward");
-    expect(result.text).not.toContain("backup path:");
+    expect(backupPath).toBeTruthy();
+    expect(backupPath?.endsWith(".rotate-latest.bak")).toBe(true);
+    expect(existsSync(backupPath!)).toBe(true);
+
+    const second = await fixture.command.handler(
+      createCommandContext("rotate", {
+        sessionId: "rotate-session",
+        sessionKey: "agent:main:main",
+      }),
+    );
+    const secondBackupPath = second.text.match(/backup path: (.+)/)?.[1]?.trim();
+    expect(secondBackupPath).toBe(backupPath);
+    expect(existsSync(secondBackupPath!)).toBe(true);
+
     expect(rotateSessionStorage).toHaveBeenCalledWith({
       sessionId: "rotate-session",
       sessionKey: "agent:main:main",
       sessionFile: transcriptPath,
     });
+  });
+
+  it("reports rotate failure when replacing the latest rotate backup throws", async () => {
+    const transcriptPath = join(tmpdir(), `lossless-claw-rotate-backup-fail-${Date.now()}.jsonl`);
+    writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
+    tempDirs.add(transcriptPath);
+
+    const rotateSessionStorage = vi.fn(async () => ({
+      kind: "rotated" as const,
+      archivedConversationId: 7,
+      activeConversationId: 8,
+      archivedMessageCount: 42,
+      checkpointSize: 1234,
+    }));
+    const deps = {
+      resolveSessionTranscriptFile: vi.fn(async () => transcriptPath),
+    } as unknown as LcmDependencies;
+    const fixture = createCommandFixture({
+      deps,
+      getLcm: async () => ({
+        rotateSessionStorage,
+      }),
+    });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+    vi.spyOn(fixture.db, "exec").mockImplementation(() => {
+      throw new Error("SQLITE_BUSY");
+    });
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "rotate-backup-failure-session",
+      sessionKey: "agent:main:main",
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "first message",
+        tokenCount: 2,
+      },
+    ]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("rotate", {
+        sessionId: "rotate-backup-failure-session",
+        sessionKey: "agent:main:main",
+      }),
+    );
+
+    expect(result.text).toContain("🪓 Lossless Claw Rotate");
+    expect(result.text).toContain("status: failed");
+    expect(result.text).toContain("reason: SQLITE_BUSY");
+    expect(rotateSessionStorage).not.toHaveBeenCalled();
   });
 
   it("reports rotate failure when the engine rotate call throws", async () => {
@@ -1240,9 +1310,10 @@ describe("lcm command", () => {
     );
 
     expect(result.text).toContain("🪓 Lossless Claw Rotate");
+    expect(result.text).toContain("status: replaced latest");
     expect(result.text).toContain("status: failed");
     expect(result.text).toContain("reason: rotate exploded");
-    expect(result.text).not.toContain("backup path:");
+    expect(result.text).toContain("backup path:");
   });
 
   it("reports rotate as unavailable when OpenClaw does not expose a session key", async () => {

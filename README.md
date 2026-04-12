@@ -281,7 +281,7 @@ For large sessions, neither command is a perfect “keep my live agent context, 
 - `/new` keeps writing into the same active LCM conversation row.
 - `/reset` changes OpenClaw session flow, which is heavier than users often want when their real problem is just LCM row size.
 
-`/lcm rotate` fills that gap. It archives the current active LCM row, creates a fresh active row for the same `sessionKey`, and checkpoints the current transcript frontier so the new row starts from now forward instead of replaying old history. Older rows remain searchable, which pairs well with cross-session search and usually improves hot-path bootstrap and assemble performance for long-lived sessions. If you want a snapshot first, run `/lcm backup` explicitly.
+`/lcm rotate` fills that gap. It replaces one rolling `rotate-latest` SQLite backup, archives the current active LCM row, creates a fresh active row for the same `sessionKey`, and checkpoints the current transcript frontier so the new row starts from now forward instead of replaying old history. Older rows remain searchable, which pairs well with cross-session search and usually improves hot-path bootstrap and assemble performance for long-lived sessions. If you want timestamped snapshots instead, run `/lcm backup`.
 
 `newSessionRetainDepth` (or `LCM_NEW_SESSION_RETAIN_DEPTH`) controls how much summary structure survives `/new`:
 

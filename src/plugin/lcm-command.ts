@@ -908,6 +908,7 @@ async function buildBackupText(params: {
 async function buildRotateText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
+  config: LcmConfig;
   deps?: LcmDependencies;
   getLcm?: () => Promise<RotateCommandEngine>;
 }): Promise<string> {
@@ -974,11 +975,56 @@ async function buildRotateText(params: {
     return lines.join("\n");
   }
 
+  const unavailableReason = getLcmBackupUnavailableReason(params.config.databasePath);
+  if (unavailableReason) {
+    lines.push(
+      buildSection("🛠️ Rotate", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", unavailableReason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
   lines.push(
     buildSection("📍 Current conversation", [
       buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
       buildStatLine("session key", formatCommand(truncateMiddle(sessionKey, 44))),
       buildStatLine("messages", formatNumber(current.stats.messageCount)),
+    ]),
+    "",
+  );
+
+  let backupPath: string | null;
+  try {
+    backupPath = createLcmDatabaseBackup(params.db, {
+      databasePath: params.config.databasePath,
+      label: "rotate",
+      replaceLatest: true,
+    });
+  } catch (error) {
+    lines.push(
+      buildSection("💾 Backup", [
+        buildStatLine("status", "failed"),
+        buildStatLine("reason", formatFailureReason(error)),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (!backupPath) {
+    lines.push(
+      buildSection("🛠️ Rotate", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", "Lossless Claw could not create the rotate backup."),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    buildSection("💾 Backup", [
+      buildStatLine("status", "replaced latest"),
+      buildStatLine("backup path", backupPath),
     ]),
     "",
   );
@@ -1306,6 +1352,7 @@ export function createLcmCommand(params: {
             text: await buildRotateText({
               ctx,
               db: await getDb(),
+              config: params.config,
               deps: params.deps,
               getLcm: params.getLcm,
             }),
