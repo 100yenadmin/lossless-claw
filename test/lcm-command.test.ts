@@ -1139,7 +1139,7 @@ describe("lcm command", () => {
     expect(result.text).toContain("reason: disk full");
   });
 
-  it("rotates the current session with backup-first storage splitting", async () => {
+  it("rotates the current session without taking an automatic backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
     tempDirs.add(transcriptPath);
@@ -1184,76 +1184,18 @@ describe("lcm command", () => {
       }),
     );
 
-    const backupPath = result.text.match(/backup path: (.+)/)?.[1]?.trim();
-
     expect(result.text).toContain("🪓 Lossless Claw Rotate");
     expect(result.text).toContain("status: rotated");
     expect(result.text).toContain("archived conversation id: 7");
     expect(result.text).toContain("new active conversation id: 8");
     expect(result.text).toContain("archived message count: 42");
     expect(result.text).toContain("mode: start from now forward");
-    expect(backupPath).toBeTruthy();
-    expect(existsSync(backupPath!)).toBe(true);
+    expect(result.text).not.toContain("backup path:");
     expect(rotateSessionStorage).toHaveBeenCalledWith({
       sessionId: "rotate-session",
       sessionKey: "agent:main:main",
       sessionFile: transcriptPath,
     });
-  });
-
-  it("reports rotate failure when the pre-rotate backup throws", async () => {
-    const transcriptPath = join(tmpdir(), `lossless-claw-rotate-backup-fail-${Date.now()}.jsonl`);
-    writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
-    tempDirs.add(transcriptPath);
-
-    const rotateSessionStorage = vi.fn(async () => ({
-      kind: "rotated" as const,
-      archivedConversationId: 7,
-      activeConversationId: 8,
-      archivedMessageCount: 42,
-      checkpointSize: 1234,
-    }));
-    const deps = {
-      resolveSessionTranscriptFile: vi.fn(async () => transcriptPath),
-    } as unknown as LcmDependencies;
-    const fixture = createCommandFixture({
-      deps,
-      getLcm: async () => ({
-        rotateSessionStorage,
-      }),
-    });
-    tempDirs.add(fixture.tempDir);
-    dbPaths.add(fixture.dbPath);
-    vi.spyOn(fixture.db, "exec").mockImplementation(() => {
-      throw new Error("SQLITE_BUSY");
-    });
-
-    const currentConversation = await fixture.conversationStore.createConversation({
-      sessionId: "rotate-backup-failure-session",
-      sessionKey: "agent:main:main",
-    });
-    await fixture.conversationStore.createMessagesBulk([
-      {
-        conversationId: currentConversation.conversationId,
-        seq: 0,
-        role: "user",
-        content: "first message",
-        tokenCount: 2,
-      },
-    ]);
-
-    const result = await fixture.command.handler(
-      createCommandContext("rotate", {
-        sessionId: "rotate-backup-failure-session",
-        sessionKey: "agent:main:main",
-      }),
-    );
-
-    expect(result.text).toContain("🪓 Lossless Claw Rotate");
-    expect(result.text).toContain("conversation id:");
-    expect(result.text).toContain("status: failed");
-    expect(result.text).toContain("reason: SQLITE_BUSY");
-    expect(rotateSessionStorage).not.toHaveBeenCalled();
   });
 
   it("reports rotate failure when the engine rotate call throws", async () => {
@@ -1297,13 +1239,10 @@ describe("lcm command", () => {
       }),
     );
 
-    const backupPath = result.text.match(/backup path: (.+)/)?.[1]?.trim();
     expect(result.text).toContain("🪓 Lossless Claw Rotate");
-    expect(result.text).toContain("status: created");
     expect(result.text).toContain("status: failed");
     expect(result.text).toContain("reason: rotate exploded");
-    expect(backupPath).toBeTruthy();
-    expect(existsSync(backupPath!)).toBe(true);
+    expect(result.text).not.toContain("backup path:");
   });
 
   it("reports rotate as unavailable when OpenClaw does not expose a session key", async () => {
@@ -1340,6 +1279,36 @@ describe("lcm command", () => {
     const result = await fixture.command.handler(
       createCommandContext("status", {
         sessionKey: "agent:main:main",
+      }),
+    );
+
+    expect(result.text).toContain(`conversation id: ${active.conversationId}`);
+    expect(result.text).not.toContain(`conversation id: ${archived.conversationId}`);
+  });
+
+  it("prefers the active conversation when session_id fallback rows share the same timestamp", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const archived = await fixture.conversationStore.createConversation({
+      sessionId: "shared-session-id",
+      sessionKey: "agent:main:archived",
+    });
+    await fixture.conversationStore.archiveConversation(archived.conversationId);
+    const active = await fixture.conversationStore.createConversation({
+      sessionId: "shared-session-id",
+      sessionKey: "agent:main:active",
+    });
+
+    const tiedTimestamp = "2026-04-11 22:57:00";
+    fixture.db
+      .prepare(`UPDATE conversations SET created_at = ? WHERE conversation_id IN (?, ?)`)
+      .run(tiedTimestamp, archived.conversationId, active.conversationId);
+
+    const result = await fixture.command.handler(
+      createCommandContext("status", {
+        sessionId: "shared-session-id",
       }),
     );
 
