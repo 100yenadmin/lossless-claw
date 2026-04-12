@@ -5030,6 +5030,61 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(maintenanceResult.reason).toBe("deferred compaction no longer needed");
   });
 
+  it("maintain() keeps deferred leaf debt pending when compaction hits an auth failure", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      evaluateIncrementalCompaction: (params: unknown) => Promise<unknown>;
+      compaction: {
+        compactLeaf: (input: unknown) => Promise<unknown>;
+      };
+    };
+    const sessionId = "maintain-deferred-compaction-auth-failure";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "leaf-trigger",
+      tokenBudget: 4_096,
+      currentTokenCount: 1_024,
+    });
+
+    vi.spyOn(privateEngine, "evaluateIncrementalCompaction").mockResolvedValue({
+      shouldCompact: true,
+      activityBand: "medium",
+      leafChunkTokens: 40_000,
+      fallbackLeafChunkTokens: [40_000, 30_000, 20_000],
+      maxPasses: 1,
+      allowCondensedPasses: false,
+      reason: "forced-for-test",
+    });
+    vi.spyOn(privateEngine.compaction, "compactLeaf").mockResolvedValue({
+      actionTaken: false,
+      authFailure: true,
+      tokensBefore: 1_024,
+      tokensAfter: 1_024,
+      condensed: false,
+    });
+
+    const maintenanceResult = await engine.maintain({
+      sessionId,
+      sessionFile: createSessionFilePath("maintain-deferred-compaction-auth-failure-maintain"),
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+      },
+    });
+
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(maintenance).not.toBeNull();
+    expect(maintenance?.pending).toBe(true);
+    expect(maintenance?.running).toBe(false);
+    expect(maintenance?.lastFailureSummary).toBe("provider auth failure");
+    expect(maintenanceResult.changed).toBe(false);
+    expect(maintenanceResult.reason).toBe("provider auth failure");
+  });
+
   it("afterTurn persists prompt-cache telemetry for hot sessions", async () => {
     const debugLog = vi.fn();
     const engine = createEngineWithDeps(

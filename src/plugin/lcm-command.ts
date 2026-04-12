@@ -20,9 +20,9 @@ import {
   type DoctorSummaryStats,
 } from "./lcm-doctor-shared.js";
 import {
+  CompactionMaintenanceStore,
   type ConversationCompactionMaintenanceRecord,
 } from "../store/compaction-maintenance-store.js";
-import { parseUtcTimestampOrNull } from "../store/parse-utc-timestamp.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -384,60 +384,13 @@ function getConversationStatusBySessionId(
   return getConversationStatusStats(db, row.conversation_id);
 }
 
-function getConversationCompactionMaintenanceByConversationId(
+async function getConversationCompactionMaintenanceByConversationId(
   db: DatabaseSync,
   conversationId: number,
-): ConversationCompactionMaintenanceRecord | null {
-  const row = db
-    .prepare(
-      `SELECT
-         conversation_id,
-         pending,
-         requested_at,
-         reason,
-         running,
-         last_started_at,
-         last_finished_at,
-         last_failure_summary,
-         token_budget,
-         current_token_count,
-         updated_at
-       FROM conversation_compaction_maintenance
-       WHERE conversation_id = ?`,
-    )
-    .get(conversationId) as
-    | {
-        conversation_id: number;
-        pending: number;
-        requested_at: string | null;
-        reason: string | null;
-        running: number;
-        last_started_at: string | null;
-        last_finished_at: string | null;
-        last_failure_summary: string | null;
-        token_budget: number | null;
-        current_token_count: number | null;
-        updated_at: string;
-      }
-    | undefined;
-
-  if (!row) {
-    return null;
-  }
-
-  return {
-    conversationId: row.conversation_id,
-    pending: row.pending === 1,
-    requestedAt: parseUtcTimestampOrNull(row.requested_at),
-    reason: row.reason,
-    running: row.running === 1,
-    lastStartedAt: parseUtcTimestampOrNull(row.last_started_at),
-    lastFinishedAt: parseUtcTimestampOrNull(row.last_finished_at),
-    lastFailureSummary: row.last_failure_summary,
-    tokenBudget: row.token_budget,
-    currentTokenCount: row.current_token_count,
-    updatedAt: parseUtcTimestampOrNull(row.updated_at) ?? new Date(0),
-  };
+): Promise<ConversationCompactionMaintenanceRecord | null> {
+  return await new CompactionMaintenanceStore(db).getConversationCompactionMaintenance(
+    conversationId,
+  );
 }
 
 async function resolveCurrentConversation(params: {
@@ -621,7 +574,7 @@ async function buildStatusText(params: {
         truncated: 0,
         fallback: 0,
       };
-    const maintenance = getConversationCompactionMaintenanceByConversationId(
+    const maintenance = await getConversationCompactionMaintenanceByConversationId(
       params.db,
       current.stats.conversationId,
     );

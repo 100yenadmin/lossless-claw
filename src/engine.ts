@@ -56,7 +56,6 @@ import {
 } from "./store/compaction-telemetry-store.js";
 import {
   CompactionMaintenanceStore,
-  type ConversationCompactionMaintenanceRecord,
 } from "./store/compaction-maintenance-store.js";
 import {
   ConversationStore,
@@ -4594,7 +4593,7 @@ export class LcmContextEngine implements ContextEngine {
     );
 
     return {
-      ok: true,
+      ok: !authFailure,
       compacted: rounds > 0,
       reason: authFailure
         ? "provider auth failure"
