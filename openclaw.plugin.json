@@ -153,6 +153,10 @@
       "label": "Cache-Aware Compaction",
       "help": "When enabled, hot prompt cache defers incremental compaction while cold cache allows bounded catch-up passes"
     },
+    "cacheAwareCompaction.cacheTTLSeconds": {
+      "label": "Short Cache TTL (seconds)",
+      "help": "Treat short-lived prompt-cache entries as hot for this many seconds before deferred compaction may rewrite the prompt"
+    },
     "cacheAwareCompaction.maxColdCacheCatchupPasses": {
       "label": "Cold Cache Catch-Up Passes",
       "help": "Maximum incremental leaf passes allowed in one maintenance cycle when prompt cache is cold"
@@ -334,6 +338,10 @@
         "properties": {
           "enabled": {
             "type": "boolean"
+          },
+          "cacheTTLSeconds": {
+            "type": "integer",
+            "minimum": 1
           },
           "maxColdCacheCatchupPasses": {
             "type": "integer",

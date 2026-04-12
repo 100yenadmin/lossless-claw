@@ -166,6 +166,7 @@ openclaw plugins install --link /path/to/lossless-claw
 | Key | Type | Default | Env override | Purpose |
 | --- | --- | --- | --- | --- |
 | `cacheAwareCompaction.enabled` | `boolean` | `true` | `LCM_CACHE_AWARE_COMPACTION_ENABLED` | Defers incremental leaf compaction more aggressively when prompt-cache telemetry indicates a hot cache. |
+| `cacheAwareCompaction.cacheTTLSeconds` | `integer` | `300` | `LCM_CACHE_TTL_SECONDS` | Fallback cache TTL used when deferred Anthropic compaction has provider/model telemetry but no explicit runtime cache-retention window. |
 | `cacheAwareCompaction.maxColdCacheCatchupPasses` | `integer` | `2` | `LCM_MAX_COLD_CACHE_CATCHUP_PASSES` | Maximum bounded catch-up passes allowed in one maintenance cycle when cache telemetry is cold. |
 | `cacheAwareCompaction.hotCachePressureFactor` | `number` | `4` | `LCM_HOT_CACHE_PRESSURE_FACTOR` | Multiplier applied to the hot-cache leaf trigger before raw-history pressure overrides cache preservation. |
 | `cacheAwareCompaction.hotCacheBudgetHeadroomRatio` | `number` | `0.2` | `LCM_HOT_CACHE_BUDGET_HEADROOM_RATIO` | Minimum fraction of the real token budget that must remain free before hot-cache incremental compaction is skipped entirely. |
@@ -247,8 +248,11 @@ This keeps long-term history available while still giving users a real clean-sla
 Lossless-claw now defaults `proactiveThresholdCompactionMode` to `deferred`.
 
 - deferred mode records a single coalesced maintenance debt row per conversation
-- `maintain()` can consume that debt when the host explicitly opts in to deferred execution
+- deferred mode persists provider/model/cache telemetry so Anthropic-family sessions can avoid rewriting a still-hot prompt cache
+- `maintain()` can still process non-prompt-mutating work when the host explicitly opts in to deferred execution, but it leaves prompt-mutating debt pending while Anthropic cache is still hot
+- `assemble()` consumes deferred prompt-mutating debt pre-assembly once the cache is cold or the next turn is already approaching overflow
 - `/lcm status` / `/lossless status` shows the current maintenance state, including pending/running/last-failure details
+- status output also surfaces the latest API/cache telemetry so operators can see whether a deferred debt item is being preserved for cache-safety reasons
 - set `proactiveThresholdCompactionMode` to `inline` only if you need the legacy inline proactive compaction behavior for compatibility
 
 ## Environment-only knobs outside plugin config

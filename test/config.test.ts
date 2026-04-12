@@ -42,6 +42,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
     expect(config.cacheAwareCompaction).toEqual({
       enabled: true,
+      cacheTTLSeconds: 300,
       maxColdCacheCatchupPasses: 2,
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
@@ -71,6 +72,7 @@ describe("resolveLcmConfig", () => {
       enabled: false,
       cacheAwareCompaction: {
         enabled: false,
+        cacheTTLSeconds: 900,
         maxColdCacheCatchupPasses: 3,
         hotCachePressureFactor: 6,
         hotCacheBudgetHeadroomRatio: 0.35,
@@ -100,6 +102,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 900,
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
@@ -123,6 +126,7 @@ describe("resolveLcmConfig", () => {
       LCM_SKIP_STATELESS_SESSIONS: "false",
       LCM_TRANSCRIPT_GC_ENABLED: "true",
       LCM_CACHE_AWARE_COMPACTION_ENABLED: "false",
+      LCM_CACHE_TTL_SECONDS: "600",
       LCM_MAX_COLD_CACHE_CATCHUP_PASSES: "4",
       LCM_HOT_CACHE_PRESSURE_FACTOR: "5.5",
       LCM_HOT_CACHE_BUDGET_HEADROOM_RATIO: "0.25",
@@ -143,6 +147,7 @@ describe("resolveLcmConfig", () => {
       enabled: true,
       cacheAwareCompaction: {
         enabled: true,
+        cacheTTLSeconds: 120,
         maxColdCacheCatchupPasses: 2,
         hotCachePressureFactor: 3,
         hotCacheBudgetHeadroomRatio: 0.1,
@@ -172,6 +177,7 @@ describe("resolveLcmConfig", () => {
     expect(config.incrementalMaxDepth).toBe(3); // env wins
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 600,
       maxColdCacheCatchupPasses: 4,
       hotCachePressureFactor: 5.5,
       hotCacheBudgetHeadroomRatio: 0.25,
@@ -331,6 +337,7 @@ describe("resolveLcmConfig", () => {
     const config = resolveLcmConfig({}, {
       cacheAwareCompaction: {
         enabled: false,
+        cacheTTLSeconds: 900,
         maxColdCacheCatchupPasses: 3,
         hotCachePressureFactor: 6,
         hotCacheBudgetHeadroomRatio: 0.35,
@@ -339,6 +346,7 @@ describe("resolveLcmConfig", () => {
 
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
+      cacheTTLSeconds: 900,
       maxColdCacheCatchupPasses: 3,
       hotCachePressureFactor: 6,
       hotCacheBudgetHeadroomRatio: 0.35,
@@ -552,6 +560,10 @@ describe("resolveLcmConfig", () => {
       properties: {
         enabled: {
           type: "boolean",
+        },
+        cacheTTLSeconds: {
+          type: "integer",
+          minimum: 1,
         },
         maxColdCacheCatchupPasses: {
           type: "integer",

@@ -19,6 +19,7 @@ export function resolveOpenclawStateDir(env: NodeJS.ProcessEnv = process.env): s
 
 export type CacheAwareCompactionConfig = {
   enabled: boolean;
+  cacheTTLSeconds: number;
   maxColdCacheCatchupPasses: number;
   hotCachePressureFactor: number;
   hotCacheBudgetHeadroomRatio: number;
@@ -433,6 +434,10 @@ export function resolveLcmConfigWithDiagnostics(
           env.LCM_CACHE_AWARE_COMPACTION_ENABLED !== undefined
             ? env.LCM_CACHE_AWARE_COMPACTION_ENABLED !== "false"
             : toBool(cacheAwareCompaction?.enabled) ?? true,
+        cacheTTLSeconds:
+          parseFiniteInt(env.LCM_CACHE_TTL_SECONDS)
+            ?? toNumber(cacheAwareCompaction?.cacheTTLSeconds)
+            ?? 300,
         maxColdCacheCatchupPasses:
           parseFiniteInt(env.LCM_MAX_COLD_CACHE_CATCHUP_PASSES)
             ?? toNumber(cacheAwareCompaction?.maxColdCacheCatchupPasses)

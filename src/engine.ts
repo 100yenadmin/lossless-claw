@@ -81,6 +81,9 @@ type PromptCacheSnapshot = {
   cacheState: CacheState;
   retention?: string;
   sawExplicitBreak: boolean;
+  lastCacheTouchAt?: Date;
+  provider?: string;
+  model?: string;
 };
 type IncrementalCompactionDecision = {
   shouldCompact: boolean;
@@ -1590,6 +1593,51 @@ export class LcmContextEngine implements ContextEngine {
     return telemetry.cacheState;
   }
 
+  /** Resolve the effective prompt-cache TTL in milliseconds for the stored retention class. */
+  private resolvePromptCacheTtlMs(retention?: string | null): number | null {
+    const normalized = retention?.trim().toLowerCase();
+    if (normalized === "none") {
+      return null;
+    }
+    if (normalized === "long" || normalized === "1h") {
+      return 60 * 60 * 1000;
+    }
+    return Math.max(1, this.config.cacheAwareCompaction.cacheTTLSeconds) * 1000;
+  }
+
+  /** Detect Anthropic-family sessions where local prompt rewrites can invalidate a hot prefix cache. */
+  private isAnthropicPromptCacheFamily(
+    telemetry: ConversationCompactionTelemetryRecord | null,
+  ): boolean {
+    const provider = telemetry?.provider?.trim().toLowerCase() ?? "";
+    const model = telemetry?.model?.trim().toLowerCase() ?? "";
+    return provider.includes("anthropic") || model.includes("claude");
+  }
+
+  /** Determine whether the last prompt-cache touch is still within the active TTL window. */
+  private isPromptCacheStillHot(
+    telemetry: ConversationCompactionTelemetryRecord | null,
+    now: Date = new Date(),
+  ): boolean {
+    const ttlMs = this.resolvePromptCacheTtlMs(telemetry?.retention ?? null);
+    if (!ttlMs) {
+      return false;
+    }
+    const touchAt = telemetry?.lastCacheTouchAt ?? telemetry?.lastObservedCacheHitAt ?? null;
+    if (!touchAt) {
+      return false;
+    }
+    return now.getTime() - touchAt.getTime() < ttlMs;
+  }
+
+  /** Delay prompt-mutating deferred compaction while Anthropic's exact-prefix cache is still hot. */
+  private shouldDelayPromptMutatingDeferredCompaction(
+    telemetry: ConversationCompactionTelemetryRecord | null,
+    now: Date = new Date(),
+  ): boolean {
+    return this.isAnthropicPromptCacheFamily(telemetry) && this.isPromptCacheStillHot(telemetry, now);
+  }
+
   /** Decide whether a hot cache still has enough real token-budget headroom to skip incremental maintenance. */
   private isComfortablyUnderTokenBudget(params: {
     currentTokenCount?: number;
@@ -1734,16 +1782,25 @@ export class LcmContextEngine implements ContextEngine {
   /** Extract the current prompt-cache snapshot from runtime context, if present. */
   private readPromptCacheSnapshot(runtimeContext?: Record<string, unknown>): PromptCacheSnapshot | null {
     const promptCache = asRecord(runtimeContext?.promptCache);
-    if (!promptCache) {
+    const provider = safeString(runtimeContext?.provider)?.trim()
+      ?? safeString(runtimeContext?.providerId)?.trim();
+    const model = safeString(runtimeContext?.model)?.trim()
+      ?? safeString(runtimeContext?.modelId)?.trim();
+    if (!promptCache && !provider && !model) {
       return null;
     }
 
-    const lastCallUsage = asRecord(promptCache.lastCallUsage);
-    const observation = asRecord(promptCache.observation);
+    const lastCallUsage = asRecord(promptCache?.lastCallUsage);
+    const observation = asRecord(promptCache?.observation);
     const cacheRead = this.normalizeOptionalCount(lastCallUsage?.cacheRead);
     const cacheWrite = this.normalizeOptionalCount(lastCallUsage?.cacheWrite);
     const sawExplicitBreak = safeBoolean(observation?.broke) === true;
-    const retention = safeString(promptCache.retention)?.trim();
+    const retention = safeString(promptCache?.retention)?.trim();
+    const lastCacheTouchAtRaw = promptCache?.lastCacheTouchAt;
+    const lastCacheTouchAt =
+      typeof lastCacheTouchAtRaw === "number" && Number.isFinite(lastCacheTouchAtRaw)
+        ? new Date(lastCacheTouchAtRaw)
+        : undefined;
     const hasUsageSignal = cacheRead !== undefined || cacheWrite !== undefined;
     const hasObservationSignal =
       typeof observation?.cacheRead === "number"
@@ -1765,6 +1822,9 @@ export class LcmContextEngine implements ContextEngine {
       cacheState,
       ...(retention ? { retention } : {}),
       sawExplicitBreak,
+      ...(lastCacheTouchAt ? { lastCacheTouchAt } : {}),
+      ...(provider ? { provider } : {}),
+      ...(model ? { model } : {}),
     };
   }
 
@@ -1789,6 +1849,14 @@ export class LcmContextEngine implements ContextEngine {
       (existing?.turnsSinceLeafCompaction ?? 0) + 1;
     const tokensAccumulatedSinceLeafCompaction =
       params.rawTokensOutsideTail ?? existing?.tokensAccumulatedSinceLeafCompaction ?? 0;
+    const touchedPromptCache =
+      snapshot?.lastCacheTouchAt
+      ?? (
+        snapshot
+        && (snapshot.lastObservedCacheRead !== undefined || snapshot.lastObservedCacheWrite !== undefined)
+          ? now
+          : existing?.lastCacheTouchAt ?? null
+      );
     const lastActivityBand = this.classifyDynamicLeafActivityBand({
       lastActivityBand: existing?.lastActivityBand,
       tokensAccumulatedSinceLeafCompaction,
@@ -1814,13 +1882,17 @@ export class LcmContextEngine implements ContextEngine {
       turnsSinceLeafCompaction,
       tokensAccumulatedSinceLeafCompaction,
       lastActivityBand,
+      lastApiCallAt: now,
+      lastCacheTouchAt: touchedPromptCache,
+      provider: snapshot?.provider ?? existing?.provider ?? null,
+      model: snapshot?.model ?? existing?.model ?? null,
     });
     const updated = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
       params.conversationId,
     );
     if (updated) {
       this.deps.log.debug(
-        `[lcm] compaction telemetry updated: conversation=${params.conversationId} cacheState=${updated.cacheState} cacheRead=${updated.lastObservedCacheRead ?? "null"} cacheWrite=${updated.lastObservedCacheWrite ?? "null"} retention=${updated.retention ?? "null"} turnsSinceLeafCompaction=${updated.turnsSinceLeafCompaction} tokensSinceLeafCompaction=${updated.tokensAccumulatedSinceLeafCompaction} activityBand=${updated.lastActivityBand} rawTokensOutsideTail=${params.rawTokensOutsideTail ?? "null"} tokenBudget=${params.tokenBudget ?? "null"}`,
+        `[lcm] compaction telemetry updated: conversation=${params.conversationId} cacheState=${updated.cacheState} cacheRead=${updated.lastObservedCacheRead ?? "null"} cacheWrite=${updated.lastObservedCacheWrite ?? "null"} retention=${updated.retention ?? "null"} lastApiCallAt=${updated.lastApiCallAt?.toISOString() ?? "null"} lastCacheTouchAt=${updated.lastCacheTouchAt?.toISOString() ?? "null"} provider=${updated.provider ?? "null"} model=${updated.model ?? "null"} turnsSinceLeafCompaction=${updated.turnsSinceLeafCompaction} tokensSinceLeafCompaction=${updated.tokensAccumulatedSinceLeafCompaction} activityBand=${updated.lastActivityBand} rawTokensOutsideTail=${params.rawTokensOutsideTail ?? "null"} tokenBudget=${params.tokenBudget ?? "null"}`,
       );
     }
     return updated;
@@ -1846,6 +1918,10 @@ export class LcmContextEngine implements ContextEngine {
       turnsSinceLeafCompaction: 0,
       tokensAccumulatedSinceLeafCompaction: 0,
       lastActivityBand: params.activityBand ?? existing?.lastActivityBand ?? "low",
+      lastApiCallAt: existing?.lastApiCallAt ?? null,
+      lastCacheTouchAt: existing?.lastCacheTouchAt ?? null,
+      provider: existing?.provider ?? null,
+      model: existing?.model ?? null,
     });
     this.deps.log.debug(
       `[lcm] compaction telemetry reset after leaf compaction: conversation=${params.conversationId} cacheState=${existing?.cacheState ?? "unknown"} activityBand=${params.activityBand ?? existing?.lastActivityBand ?? "low"}`,
@@ -3758,6 +3834,12 @@ export class LcmContextEngine implements ContextEngine {
         }
 
         let deferredCompactionResult: ContextEngineMaintenanceResult | null = null;
+        const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
+          conversation.conversationId,
+        );
+        const telemetry = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
+          conversation.conversationId,
+        );
         if (params.runtimeContext?.allowDeferredCompactionExecution === true) {
           const runtimeTokenBudget = (() => {
             const tokenBudget = asRecord(params.runtimeContext)?.tokenBudget;
@@ -3770,27 +3852,29 @@ export class LcmContextEngine implements ContextEngine {
             }
             return 128_000;
           })();
-          deferredCompactionResult = await this.consumeDeferredCompactionDebt({
-            conversationId: conversation.conversationId,
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            tokenBudget: this.applyAssemblyBudgetCap(runtimeTokenBudget),
-            currentTokenCount:
-              typeof params.runtimeContext?.currentTokenCount === "number"
-                ? Math.floor(params.runtimeContext.currentTokenCount as number)
-                : undefined,
-            runtimeContext: params.runtimeContext,
-            legacyParams: asRecord(params.runtimeContext),
-          });
-        } else {
-          const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
-            conversation.conversationId,
-          );
-          if (maintenance?.pending || maintenance?.running) {
+          if ((maintenance?.pending || maintenance?.running)
+            && this.shouldDelayPromptMutatingDeferredCompaction(telemetry)) {
             this.deps.log.info(
-              `[lcm] maintain: deferred compaction debt pending conversation=${conversation.conversationId} ${sessionLabel} but host runtimeContext.allowDeferredCompactionExecution is disabled`,
+              `[lcm] maintain: deferred compaction debt still hot-cache deferred conversation=${conversation.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
             );
+          } else {
+            deferredCompactionResult = await this.consumeDeferredCompactionDebt({
+              conversationId: conversation.conversationId,
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              tokenBudget: this.applyAssemblyBudgetCap(runtimeTokenBudget),
+              currentTokenCount:
+                typeof params.runtimeContext?.currentTokenCount === "number"
+                  ? Math.floor(params.runtimeContext.currentTokenCount as number)
+                  : undefined,
+              runtimeContext: params.runtimeContext,
+              legacyParams: asRecord(params.runtimeContext),
+            });
           }
+        } else if (maintenance?.pending || maintenance?.running) {
+          this.deps.log.info(
+            `[lcm] maintain: deferred compaction debt pending conversation=${conversation.conversationId} ${sessionLabel} but host runtimeContext.allowDeferredCompactionExecution is disabled`,
+          );
         }
 
         if (!this.config.transcriptGcEnabled) {
@@ -4250,7 +4334,7 @@ export class LcmContextEngine implements ContextEngine {
       const rawLeafTrigger = await this.compaction.evaluateLeafTrigger(conversation.conversationId);
       await this.updateCompactionTelemetry({
         conversationId: conversation.conversationId,
-        runtimeContext: asRecord(params.runtimeContext),
+        runtimeContext: legacyParams,
         tokenBudget,
         rawTokensOutsideTail: rawLeafTrigger.rawTokensOutsideTail,
       });
@@ -4272,7 +4356,9 @@ export class LcmContextEngine implements ContextEngine {
         liveContextTokens,
       );
       if (this.config.proactiveThresholdCompactionMode === "inline") {
+        let leafCompactionScheduled = false;
         if (leafDecision.shouldCompact) {
+          leafCompactionScheduled = true;
           this.compactLeafAsync({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
@@ -4290,18 +4376,20 @@ export class LcmContextEngine implements ContextEngine {
           });
         }
 
-        try {
-          await this.compact({
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            sessionFile: params.sessionFile,
-            tokenBudget,
-            currentTokenCount: liveContextTokens,
-            compactionTarget: "threshold",
-            legacyParams,
-          });
-        } catch {
-          // Proactive compaction is best-effort in the post-turn lifecycle.
+        if (!leafCompactionScheduled) {
+          try {
+            await this.compact({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              sessionFile: params.sessionFile,
+              tokenBudget,
+              currentTokenCount: liveContextTokens,
+              compactionTarget: "threshold",
+              legacyParams,
+            });
+          } catch {
+            // Proactive compaction is best-effort in the post-turn lifecycle.
+          }
         }
       } else if (thresholdDecision.shouldCompact || leafDecision.shouldCompact) {
         await this.recordDeferredCompactionDebt({
@@ -4358,6 +4446,55 @@ export class LcmContextEngine implements ContextEngine {
         };
       }
 
+      const tokenBudget = this.applyAssemblyBudgetCap(
+        typeof params.tokenBudget === "number" &&
+        Number.isFinite(params.tokenBudget) &&
+        params.tokenBudget > 0
+          ? Math.floor(params.tokenBudget)
+          : 128_000,
+      );
+      const liveContextTokens = estimateSessionTokenCountForAfterTurn(params.messages);
+      const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
+        conversation.conversationId,
+      );
+      const telemetry = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
+        conversation.conversationId,
+      );
+      const promptOverflowEmergency = liveContextTokens > tokenBudget;
+      if (
+        (maintenance?.pending || maintenance?.running)
+        && (
+          promptOverflowEmergency
+          || !this.shouldDelayPromptMutatingDeferredCompaction(telemetry)
+        )
+      ) {
+        const deferredLegacyParams =
+          telemetry?.provider || telemetry?.model
+            ? {
+                ...(telemetry.provider ? { provider: telemetry.provider } : {}),
+                ...(telemetry.model ? { model: telemetry.model } : {}),
+              }
+            : undefined;
+        try {
+          await this.consumeDeferredCompactionDebt({
+            conversationId: conversation.conversationId,
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            tokenBudget,
+            currentTokenCount: liveContextTokens,
+            legacyParams: deferredLegacyParams,
+          });
+        } catch (error) {
+          this.deps.log.warn(
+            `[lcm] assemble: deferred compaction execution failed for ${sessionLabel}: ${describeLogError(error)}`,
+          );
+        }
+      } else if (maintenance?.pending || maintenance?.running) {
+        this.deps.log.info(
+          `[lcm] assemble: deferred compaction still cache-hot for conversation=${conversation.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
+        );
+      }
+
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);
       if (contextItems.length === 0) {
         this.deps.log.info(
@@ -4382,14 +4519,6 @@ export class LcmContextEngine implements ContextEngine {
           estimatedTokens: 0,
         };
       }
-
-      const tokenBudget = this.applyAssemblyBudgetCap(
-        typeof params.tokenBudget === "number" &&
-        Number.isFinite(params.tokenBudget) &&
-        params.tokenBudget > 0
-          ? Math.floor(params.tokenBudget)
-          : 128_000,
-      );
 
       const assembled = await this.assembler.assemble({
         conversationId: conversation.conversationId,

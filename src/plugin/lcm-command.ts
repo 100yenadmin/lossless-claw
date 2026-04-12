@@ -23,6 +23,7 @@ import {
   CompactionMaintenanceStore,
   type ConversationCompactionMaintenanceRecord,
 } from "../store/compaction-maintenance-store.js";
+import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -393,6 +394,13 @@ async function getConversationCompactionMaintenanceByConversationId(
   );
 }
 
+async function getConversationCompactionTelemetryByConversationId(
+  db: DatabaseSync,
+  conversationId: number,
+) {
+  return await new CompactionTelemetryStore(db).getConversationCompactionTelemetry(conversationId);
+}
+
 async function resolveCurrentConversation(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
@@ -578,6 +586,10 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
+    const telemetry = await getConversationCompactionTelemetryByConversationId(
+      params.db,
+      current.stats.conversationId,
+    );
     const formatMaintenanceTime = (value: Date | null): string =>
       value ? formatTimestamp(value, params.config.timezone) : "never";
     lines.push(
@@ -631,6 +643,11 @@ async function buildStatusText(params: {
           "observed token count",
           maintenance?.currentTokenCount != null ? formatNumber(maintenance.currentTokenCount) : "unknown",
         ),
+        buildStatLine("last api call", formatMaintenanceTime(telemetry?.lastApiCallAt ?? null)),
+        buildStatLine("last cache touch", formatMaintenanceTime(telemetry?.lastCacheTouchAt ?? null)),
+        buildStatLine("cache retention", telemetry?.retention ?? "unknown"),
+        buildStatLine("cache state", telemetry?.cacheState ?? "unknown"),
+        buildStatLine("provider/model", [telemetry?.provider, telemetry?.model].filter(Boolean).join(" / ") || "unknown"),
       ]),
     );
   } else {
