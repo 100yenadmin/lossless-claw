@@ -58,6 +58,43 @@ When OpenClaw processes a turn, it calls the context engine's lifecycle hooks:
 2. **ingest** / **ingestBatch** — Persists new messages to the database and appends them to context_items.
 3. **afterTurn** — After the model responds, ingests new messages, then evaluates whether compaction should run.
 
+### Hot-path guardrails
+
+The session lane is the part of LCM that users feel directly: if it stays busy, the next live turn looks hung even when the model provider is healthy.
+
+The hot-path changes in this branch keep the **minimum correctness work** inline and push **optional cleanup work** into best-effort follow-up tasks when the turn is already close to its deadline.
+
+```mermaid
+flowchart LR
+    A["turn starts"] --> B["bootstrap / assemble / ingest"]
+    B --> C["reply-critical work stays inline"]
+    C --> D["optional maintenance evaluated"]
+    D --> E{"enough time left?"}
+    E -- yes --> F["run maintenance now"]
+    E -- no --> G["schedule best-effort background work"]
+    F --> H["session lane released"]
+    G --> H
+```
+
+In practice that means:
+- `bootstrap()` logs step-by-step timings for checkpoint checks, append-only probes, transcript parsing, and reconcile, so slow starts are attributable instead of opaque.
+- `maintain()` can defer bootstrap checkpoint refresh when transcript cleanup already consumed the remaining budget.
+- `afterTurn()` ingests the new turn inline, but threshold compaction can be scheduled onto the next event-loop tick instead of occupying the immediate reply path.
+
+```mermaid
+flowchart TD
+    A["bootstrap"] --> B["checkpoint check"]
+    B --> C{"checkpoint hit?"}
+    C -- yes --> D["done"]
+    C -- no --> E["append-only probe"]
+    E --> F{"append-only hit?"}
+    F -- yes --> G["import tail only"]
+    F -- no --> H["full transcript parse"]
+    H --> I["reconcile"]
+    G --> J["done"]
+    I --> J
+```
+
 ### Leaf compaction
 
 The **leaf pass** converts raw messages into leaf summaries:

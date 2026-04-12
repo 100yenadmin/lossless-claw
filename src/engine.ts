@@ -113,6 +113,10 @@ type ContextEngineMaintenanceRuntimeContext = Record<string, unknown> & {
     request: TranscriptRewriteRequest,
   ) => Promise<ContextEngineMaintenanceResult>;
 };
+type LifecycleTraceContext = {
+  traceId: string;
+  remainingTimeMs?: number;
+};
 
 const TRANSCRIPT_GC_BATCH_SIZE = 12;
 const HOT_CACHE_HYSTERESIS_TURNS = 2;
@@ -122,6 +126,7 @@ const DYNAMIC_ACTIVITY_MEDIUM_UPSHIFT_FACTOR = 0.5;
 const DYNAMIC_ACTIVITY_MEDIUM_DOWNSHIFT_FACTOR = 0.35;
 const DYNAMIC_ACTIVITY_HIGH_UPSHIFT_FACTOR = 1.0;
 const DYNAMIC_ACTIVITY_HIGH_DOWNSHIFT_FACTOR = 0.75;
+const BACKGROUND_WORK_SKIP_REMAINING_TIME_MS = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +141,105 @@ function safeString(value: unknown): string | undefined {
 
 function formatDurationMs(durationMs: number): string {
   return `${durationMs}ms`;
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return Math.floor(value);
+}
+
+function readLifecycleTraceId(candidate: Record<string, unknown> | undefined): string | undefined {
+  if (!candidate) {
+    return undefined;
+  }
+  const traceId =
+    safeString(candidate.traceId) ??
+    safeString(candidate.trace_id) ??
+    safeString(candidate.requestId) ??
+    safeString(candidate.request_id) ??
+    safeString(candidate.runId) ??
+    safeString(candidate.run_id) ??
+    safeString(candidate.trace) ??
+    safeString(candidate.id);
+  return traceId?.trim() || undefined;
+}
+
+function readLifecycleRemainingTimeMs(candidate: Record<string, unknown> | undefined): number | undefined {
+  if (!candidate) {
+    return undefined;
+  }
+
+  const direct =
+    readPositiveInteger(candidate.remainingTimeMs) ??
+    readPositiveInteger(candidate.remaining_time_ms) ??
+    readPositiveInteger(candidate.timeRemainingMs) ??
+    readPositiveInteger(candidate.time_remaining_ms) ??
+    readPositiveInteger(candidate.remainingBudgetMs) ??
+    readPositiveInteger(candidate.remaining_budget_ms) ??
+    readPositiveInteger(candidate.timeBudgetMs) ??
+    readPositiveInteger(candidate.time_budget_ms);
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const deadlineCandidate =
+    candidate.deadlineMs ??
+    candidate.deadline_ms ??
+    candidate.deadlineAt ??
+    candidate.deadline_at ??
+    candidate.deadline;
+  if (typeof deadlineCandidate === "number" && Number.isFinite(deadlineCandidate)) {
+    return Math.floor(deadlineCandidate - Date.now());
+  }
+  if (typeof deadlineCandidate === "string" && deadlineCandidate.trim()) {
+    const parsedNumber = Number(deadlineCandidate);
+    if (Number.isFinite(parsedNumber)) {
+      return Math.floor(parsedNumber - Date.now());
+    }
+    const parsedDate = Date.parse(deadlineCandidate);
+    if (Number.isFinite(parsedDate)) {
+      return Math.floor(parsedDate - Date.now());
+    }
+  }
+
+  return undefined;
+}
+
+function lifecycleMessageFingerprint(messages: AgentMessage[] | undefined): string | undefined {
+  if (!messages || messages.length === 0) {
+    return undefined;
+  }
+  const hash = createHash("sha256");
+  for (const message of messages) {
+    hash.update(message.role);
+    hash.update("\u0000");
+    if (typeof message.content === "string") {
+      hash.update(message.content);
+    } else if (Array.isArray(message.content)) {
+      hash.update(`blocks:${message.content.length}`);
+      for (const block of message.content.slice(0, 8)) {
+        const record = asRecord(block);
+        hash.update("\u0002");
+        hash.update(safeString(record?.type) ?? typeof block);
+        hash.update("\u0003");
+        hash.update(
+          safeString(record?.id) ??
+            safeString(record?.call_id) ??
+            safeString(record?.toolCallId) ??
+            safeString(record?.tool_call_id) ??
+            safeString(record?.toolUseId) ??
+            safeString(record?.tool_use_id) ??
+            "",
+        );
+      }
+    } else {
+      hash.update(typeof message.content);
+    }
+    hash.update("\u0001");
+  }
+  return hash.digest("hex").slice(0, 16);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1152,10 +1256,20 @@ function readLastJsonlEntryBeforeOffset(
 function readAppendedLeafPathMessages(params: {
   sessionFile: string;
   offset: number;
-}): { messages: AgentMessage[]; canUseAppendOnly: boolean; sawNonWhitespace: boolean } {
+}): {
+  messages: AgentMessage[];
+  canUseAppendOnly: boolean;
+  sawNonWhitespace: boolean;
+  failureReason?: string;
+} {
   const raw = readFileSegment(params.sessionFile, params.offset);
   if (raw == null) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: false };
+    return {
+      messages: [],
+      canUseAppendOnly: false,
+      sawNonWhitespace: false,
+      failureReason: "segment-read-failed",
+    };
   }
 
   const trimmed = raw.trim();
@@ -1164,12 +1278,22 @@ function readAppendedLeafPathMessages(params: {
   }
 
   if (trimmed.startsWith("[")) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: true };
+    return {
+      messages: [],
+      canUseAppendOnly: false,
+      sawNonWhitespace: true,
+      failureReason: "json-array-tail",
+    };
   }
 
   const parsed = parseBootstrapJsonl(raw, { strict: true });
   if (parsed.hadMalformedLine) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: parsed.sawNonWhitespace };
+    return {
+      messages: [],
+      canUseAppendOnly: false,
+      sawNonWhitespace: parsed.sawNonWhitespace,
+      failureReason: "malformed-jsonl",
+    };
   }
 
   return {
@@ -1541,6 +1665,89 @@ export class LcmContextEngine implements ContextEngine {
       return undefined;
     }
     return Math.floor(value);
+  }
+
+  /** Schedule best-effort follow-up work on the next event-loop tick. */
+  private scheduleBackgroundWork(params: {
+    label: string;
+    traceId: string;
+    work: () => Promise<void>;
+    remainingTimeMs?: number;
+  }): void {
+    if (params.remainingTimeMs !== undefined && params.remainingTimeMs <= BACKGROUND_WORK_SKIP_REMAINING_TIME_MS) {
+      this.deps.log.info(
+        `[lcm] ${params.label}: deferred trace=${params.traceId} reason=remaining-time-exhausted remainingTimeMs=${params.remainingTimeMs}`,
+      );
+      return;
+    }
+
+    if (params.remainingTimeMs !== undefined) {
+      this.deps.log.info(
+        `[lcm] ${params.label}: scheduled background work trace=${params.traceId} remainingTimeMs=${params.remainingTimeMs}`,
+      );
+    } else {
+      this.deps.log.info(
+        `[lcm] ${params.label}: scheduled background work trace=${params.traceId}`,
+      );
+    }
+
+    setImmediate(() => {
+      const startedAt = Date.now();
+      void Promise.resolve()
+        .then(() => params.work())
+        .then(() => {
+          this.deps.log.info(
+            `[lcm] ${params.label}: background work complete trace=${params.traceId} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          );
+        })
+        .catch((err) => {
+          this.deps.log.warn(
+            `[lcm] ${params.label}: background work failed trace=${params.traceId} error=${describeLogError(err)}`,
+          );
+        });
+    });
+  }
+
+  /** Build a stable trace label for lifecycle logs. */
+  private resolveLifecycleTraceContext(params: {
+    traceId?: string;
+    sessionId?: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    conversationId?: number;
+    messages?: AgentMessage[];
+    runtimeContext?: Record<string, unknown>;
+    legacyParams?: Record<string, unknown>;
+    remainingTimeMs?: number;
+  }): LifecycleTraceContext {
+    const traceId =
+      params.traceId?.trim() ||
+      readLifecycleTraceId(params.runtimeContext) ||
+      readLifecycleTraceId(params.legacyParams);
+    const resolvedTraceId =
+      traceId ||
+      `lcm-${createHash("sha256")
+        .update(
+          [
+            params.sessionId?.trim() ?? "",
+            params.sessionKey?.trim() ?? "",
+            params.sessionFile?.trim() ?? "",
+            typeof params.conversationId === "number" ? String(params.conversationId) : "",
+            lifecycleMessageFingerprint(params.messages) ?? "",
+          ].join("\u0000"),
+        )
+        .digest("hex")
+        .slice(0, 16)}`;
+
+    const remainingTimeMs =
+      params.remainingTimeMs ??
+      readLifecycleRemainingTimeMs(params.runtimeContext) ??
+      readLifecycleRemainingTimeMs(params.legacyParams);
+
+    return {
+      traceId: resolvedTraceId,
+      remainingTimeMs,
+    };
   }
 
   /** Treat a recent cache hit as still-hot for a couple of turns unless telemetry observed a later break. */
@@ -2614,6 +2821,8 @@ export class LcmContextEngine implements ContextEngine {
     sessionId: string;
     sessionFile: string;
     sessionKey?: string;
+    traceId?: string;
+    remainingTimeMs?: number;
   }): Promise<BootstrapResult> {
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
       return {
@@ -2638,6 +2847,21 @@ export class LcmContextEngine implements ContextEngine {
     const sessionFileStats = statSync(params.sessionFile);
     const sessionFileSize = sessionFileStats.size;
     const sessionFileMtimeMs = Math.trunc(sessionFileStats.mtimeMs);
+    const traceContext = this.resolveLifecycleTraceContext({
+      traceId: params.traceId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      sessionFile: params.sessionFile,
+      remainingTimeMs: params.remainingTimeMs,
+    });
+    const traceLabel = `trace=${traceContext.traceId}`;
+    const stepTimings = {
+      checkpointCheckMs: 0,
+      appendOnlyProbeMs: 0,
+      sessionParseMs: 0,
+      reconcileMs: 0,
+    };
+    this.deps.log.info(`[lcm] bootstrap: start ${traceLabel} ${sessionLabel}`);
 
     const result = await this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
@@ -2660,6 +2884,15 @@ export class LcmContextEngine implements ContextEngine {
             sessionKey: params.sessionKey,
           });
           const conversationId = conversation.conversationId;
+          const logBootstrapStepTimings = () => {
+            this.deps.log.info(
+              `[lcm] bootstrap: step timings conversation=${conversationId} ${sessionLabel} ${traceLabel} checkpointCheckMs=${stepTimings.checkpointCheckMs} appendOnlyProbeMs=${stepTimings.appendOnlyProbeMs} sessionParseMs=${stepTimings.sessionParseMs} reconcileMs=${stepTimings.reconcileMs}`,
+            );
+          };
+          const finishBootstrap = (value: BootstrapResult): BootstrapResult => {
+            logBootstrapStepTimings();
+            return value;
+          };
           const existingCount = await this.conversationStore.getMessageCount(conversationId);
           const bootstrapState =
             existingCount > 0
@@ -2668,25 +2901,46 @@ export class LcmContextEngine implements ContextEngine {
 
           // If the transcript file is byte-for-byte unchanged from the last
           // successful bootstrap checkpoint, skip reopening and reparsing it.
+          const checkpointCheckStartedAt = Date.now();
+          let checkpointMissReason = "missing-checkpoint";
           if (
             bootstrapState &&
             bootstrapState.sessionFilePath === params.sessionFile &&
             bootstrapState.lastSeenSize === sessionFileSize &&
             bootstrapState.lastSeenMtimeMs === sessionFileMtimeMs
           ) {
+            stepTimings.checkpointCheckMs = Date.now() - checkpointCheckStartedAt;
             if (!conversation.bootstrappedAt) {
               await this.conversationStore.markConversationBootstrapped(conversationId);
             }
             this.deps.log.info(
-              `[lcm] bootstrap: checkpoint hit conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} duration=${formatDurationMs(Date.now() - startedAt)}`,
+              `[lcm] bootstrap: checkpoint hit conversation=${conversationId} ${sessionLabel} ${traceLabel} existingCount=${existingCount} duration=${formatDurationMs(Date.now() - startedAt)}`,
             );
-            return {
+            return finishBootstrap({
               bootstrapped: false,
               importedMessages: 0,
               reason: conversation.bootstrappedAt ? "already bootstrapped" : "conversation already up to date",
-            };
+            });
           }
+          if (bootstrapState) {
+            if (bootstrapState.sessionFilePath !== params.sessionFile) {
+              checkpointMissReason = "session-file-changed";
+            } else if (bootstrapState.lastSeenSize !== sessionFileSize) {
+              checkpointMissReason = "size-changed";
+            } else if (bootstrapState.lastSeenMtimeMs !== sessionFileMtimeMs) {
+              checkpointMissReason = "mtime-changed";
+            } else {
+              checkpointMissReason = "checkpoint-incomplete";
+            }
+          }
+          stepTimings.checkpointCheckMs = Date.now() - checkpointCheckStartedAt;
+          this.deps.log.info(
+            `[lcm] bootstrap: checkpoint miss conversation=${conversationId} ${sessionLabel} ${traceLabel} existingCount=${existingCount} reason=${checkpointMissReason} checkpointCheckMs=${stepTimings.checkpointCheckMs}`,
+          );
 
+          const appendOnlyProbeStartedAt = Date.now();
+          let appendOnlyMissReason =
+            existingCount > 0 ? "missing-checkpoint" : "no-existing-messages";
           if (
             existingCount > 0 &&
             bootstrapState &&
@@ -2702,6 +2956,11 @@ export class LcmContextEngine implements ContextEngine {
                   tokenCount: latestDbMessage.tokenCount,
                 })
               : null;
+            if (!latestDbMessage || !latestDbHash) {
+              appendOnlyMissReason = "missing-db-tail";
+            } else if (latestDbHash !== bootstrapState.lastProcessedEntryHash) {
+              appendOnlyMissReason = "db-tail-checkpoint-hash-mismatch";
+            }
             const tailEntryRaw = readLastJsonlEntryBeforeOffset(
               params.sessionFile,
               bootstrapState.lastProcessedOffset,
@@ -2712,6 +2971,13 @@ export class LcmContextEngine implements ContextEngine {
             const tailEntryHash = tailEntryMessage
               ? createBootstrapEntryHash(toStoredMessage(tailEntryMessage))
               : null;
+            if (!tailEntryRaw) {
+              appendOnlyMissReason = "checkpoint-tail-entry-missing";
+            } else if (!tailEntryHash) {
+              appendOnlyMissReason = "checkpoint-tail-entry-unparseable";
+            } else if (tailEntryHash !== bootstrapState.lastProcessedEntryHash) {
+              appendOnlyMissReason = "checkpoint-tail-entry-hash-mismatch";
+            }
 
             if (
               latestDbHash &&
@@ -2723,7 +2989,11 @@ export class LcmContextEngine implements ContextEngine {
                 sessionFile: params.sessionFile,
                 offset: bootstrapState.lastProcessedOffset,
               });
+              if (!appended.canUseAppendOnly) {
+                appendOnlyMissReason = appended.failureReason ?? "append-segment-not-append-only";
+              }
               if (appended.canUseAppendOnly) {
+                stepTimings.appendOnlyProbeMs = Date.now() - appendOnlyProbeStartedAt;
                 if (!conversation.bootstrappedAt) {
                   await this.conversationStore.markConversationBootstrapped(conversationId);
                 }
@@ -2742,29 +3012,47 @@ export class LcmContextEngine implements ContextEngine {
 
                 await persistBootstrapState(conversationId);
                 this.deps.log.info(
-                  `[lcm] bootstrap: append-only conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} appendedMessages=${appended.messages.length} importedMessages=${importedMessages} duration=${formatDurationMs(Date.now() - startedAt)}`,
+                  `[lcm] bootstrap: append-only conversation=${conversationId} ${sessionLabel} ${traceLabel} existingCount=${existingCount} appendedMessages=${appended.messages.length} importedMessages=${importedMessages} duration=${formatDurationMs(Date.now() - startedAt)}`,
                 );
 
                 if (importedMessages > 0) {
-                  return {
+                  return finishBootstrap({
                     bootstrapped: true,
                     importedMessages,
                     reason: "reconciled missing session messages",
-                  };
+                  });
                 }
 
-                return {
+                return finishBootstrap({
                   bootstrapped: false,
                   importedMessages: 0,
                   reason: conversation.bootstrappedAt ? "already bootstrapped" : "conversation already up to date",
-                };
+                });
               }
             }
+          } else if (existingCount > 0) {
+            if (!bootstrapState) {
+              appendOnlyMissReason = "missing-checkpoint";
+            } else if (bootstrapState.sessionFilePath !== params.sessionFile) {
+              appendOnlyMissReason = "session-file-changed";
+            } else if (sessionFileSize <= bootstrapState.lastSeenSize) {
+              appendOnlyMissReason = "session-file-not-appended";
+            } else if (sessionFileMtimeMs < bootstrapState.lastSeenMtimeMs) {
+              appendOnlyMissReason = "mtime-regressed";
+            } else {
+              appendOnlyMissReason = "append-only-preconditions-not-met";
+            }
           }
-
-          const historicalMessages = await readLeafPathMessages(params.sessionFile);
+          stepTimings.appendOnlyProbeMs = Date.now() - appendOnlyProbeStartedAt;
           this.deps.log.info(
-            `[lcm] bootstrap: full transcript read conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} historicalMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] bootstrap: append-only fast-path miss conversation=${conversationId} ${sessionLabel} ${traceLabel} existingCount=${existingCount} reason=${appendOnlyMissReason} appendOnlyProbeMs=${stepTimings.appendOnlyProbeMs}`,
+          );
+
+          const sessionParseStartedAt = Date.now();
+          const historicalMessages = await readLeafPathMessages(params.sessionFile);
+          stepTimings.sessionParseMs = Date.now() - sessionParseStartedAt;
+          this.deps.log.info(
+            `[lcm] bootstrap: full transcript read conversation=${conversationId} ${sessionLabel} ${traceLabel} existingCount=${existingCount} historicalMessages=${historicalMessages.length} sessionParseMs=${stepTimings.sessionParseMs} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
 
           // First-time import path: no LCM rows yet, so seed directly from the
@@ -2778,11 +3066,11 @@ export class LcmContextEngine implements ContextEngine {
             if (bootstrapMessages.length === 0) {
               await this.conversationStore.markConversationBootstrapped(conversationId);
               await persistBootstrapState(conversationId);
-              return {
+              return finishBootstrap({
                 bootstrapped: false,
                 importedMessages: 0,
                 reason: "no leaf-path messages in session",
-              };
+              });
             }
 
             const nextSeq = (await this.conversationStore.getMaxSeq(conversationId)) + 1;
@@ -2809,40 +3097,42 @@ export class LcmContextEngine implements ContextEngine {
               const pruned = await this.pruneHeartbeatOkTurns(conversationId);
               if (pruned > 0) {
                 this.deps.log.info(
-                  `[lcm] bootstrap: pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversationId}`,
+                  `[lcm] bootstrap: pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversationId} ${traceLabel}`,
                 );
               }
             }
 
             await persistBootstrapState(conversationId);
             this.deps.log.info(
-              `[lcm] bootstrap: initial import conversation=${conversationId} ${sessionLabel} importedMessages=${inserted.length} sourceMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+              `[lcm] bootstrap: initial import conversation=${conversationId} ${sessionLabel} ${traceLabel} importedMessages=${inserted.length} sourceMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
             );
 
-            return {
+            return finishBootstrap({
               bootstrapped: true,
               importedMessages: inserted.length,
-            };
+            });
           }
 
           // Existing conversation path: reconcile crash gaps by appending JSONL
           // messages that were never persisted to LCM.
+          const reconcileStartedAt = Date.now();
           const reconcile = await this.reconcileSessionTail({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
             conversationId,
             historicalMessages,
           });
+          stepTimings.reconcileMs = Date.now() - reconcileStartedAt;
           this.deps.log.info(
-            `[lcm] bootstrap: reconcile finished conversation=${conversationId} ${sessionLabel} importedMessages=${reconcile.importedMessages} overlap=${reconcile.hasOverlap} blockedByImportCap=${reconcile.blockedByImportCap} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] bootstrap: reconcile finished conversation=${conversationId} ${sessionLabel} ${traceLabel} importedMessages=${reconcile.importedMessages} overlap=${reconcile.hasOverlap} blockedByImportCap=${reconcile.blockedByImportCap} reconcileMs=${stepTimings.reconcileMs} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
 
           if (reconcile.blockedByImportCap) {
-            return {
+            return finishBootstrap({
               bootstrapped: false,
               importedMessages: 0,
               reason: "reconcile import capped",
-            };
+            });
           }
 
           if (!conversation.bootstrappedAt) {
@@ -2851,11 +3141,11 @@ export class LcmContextEngine implements ContextEngine {
 
           if (reconcile.importedMessages > 0) {
             await persistBootstrapState(conversationId);
-            return {
+            return finishBootstrap({
               bootstrapped: true,
               importedMessages: reconcile.importedMessages,
               reason: "reconciled missing session messages",
-            };
+            });
           }
 
           if (reconcile.hasOverlap) {
@@ -2863,20 +3153,20 @@ export class LcmContextEngine implements ContextEngine {
           }
 
           if (conversation.bootstrappedAt) {
-            return {
+            return finishBootstrap({
               bootstrapped: false,
               importedMessages: 0,
               reason: "already bootstrapped",
-            };
+            });
           }
 
-          return {
+          return finishBootstrap({
             bootstrapped: false,
             importedMessages: 0,
             reason: reconcile.hasOverlap
               ? "conversation already up to date"
               : "conversation already has messages",
-          };
+          });
         }),
       { operationName: "bootstrap", context: sessionLabel },
     );
@@ -2884,32 +3174,44 @@ export class LcmContextEngine implements ContextEngine {
     // Post-bootstrap pruning: clean HEARTBEAT_OK turns that were already
     // in the DB from prior bootstrap cycles (before pruning was enabled).
     if (this.config.pruneHeartbeatOk && result.bootstrapped === false) {
-      try {
-        const conversation = await this.conversationStore.getConversationForSession({
-          sessionId: params.sessionId,
-          sessionKey: params.sessionKey,
-        });
-        if (conversation) {
-          const pruned = await this.pruneHeartbeatOkTurns(conversation.conversationId);
-          if (pruned > 0) {
-            await this.refreshBootstrapState({
-              conversationId: conversation.conversationId,
-              sessionFile: params.sessionFile,
-            });
-            this.deps.log.info(
-              `[lcm] bootstrap: retroactively pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversation.conversationId}`,
-            );
+      const pruneHeartbeatOk = async (): Promise<void> => {
+        try {
+          const conversation = await this.conversationStore.getConversationForSession({
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+          });
+          if (conversation) {
+            const pruned = await this.pruneHeartbeatOkTurns(conversation.conversationId);
+            if (pruned > 0) {
+              await this.refreshBootstrapState({
+                conversationId: conversation.conversationId,
+                sessionFile: params.sessionFile,
+              });
+              this.deps.log.info(
+                `[lcm] bootstrap: retroactively pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversation.conversationId} ${traceLabel}`,
+              );
+            }
           }
+        } catch (err) {
+          this.deps.log.warn(
+            `[lcm] bootstrap: heartbeat pruning failed ${traceLabel}: ${describeLogError(err)}`,
+          );
         }
-      } catch (err) {
-        this.deps.log.warn(
-          `[lcm] bootstrap: heartbeat pruning failed: ${describeLogError(err)}`,
-        );
+      };
+      if (traceContext.remainingTimeMs !== undefined) {
+        this.scheduleBackgroundWork({
+          label: "bootstrap: heartbeat pruning",
+          traceId: traceContext.traceId,
+          remainingTimeMs: traceContext.remainingTimeMs,
+          work: pruneHeartbeatOk,
+        });
+      } else {
+        await pruneHeartbeatOk();
       }
     }
 
     this.deps.log.info(
-      `[lcm] bootstrap: done ${sessionLabel} bootstrapped=${result.bootstrapped} importedMessages=${result.importedMessages} reason=${result.reason ?? "none"} duration=${formatDurationMs(Date.now() - startedAt)}`,
+      `[lcm] bootstrap: done ${sessionLabel} ${traceLabel} bootstrapped=${result.bootstrapped} importedMessages=${result.importedMessages} reason=${result.reason ?? "none"} duration=${formatDurationMs(Date.now() - startedAt)}`,
     );
     return result;
   }
@@ -3024,6 +3326,8 @@ export class LcmContextEngine implements ContextEngine {
     sessionFile: string;
     sessionKey?: string;
     runtimeContext?: ContextEngineMaintenanceRuntimeContext;
+    traceId?: string;
+    remainingTimeMs?: number;
   }): Promise<ContextEngineMaintenanceResult> {
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
       return {
@@ -3056,6 +3360,16 @@ export class LcmContextEngine implements ContextEngine {
       `session=${params.sessionId}`,
       ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
     ].join(" ");
+    const traceContext = this.resolveLifecycleTraceContext({
+      traceId: params.traceId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      sessionFile: params.sessionFile,
+      runtimeContext: params.runtimeContext,
+      remainingTimeMs: params.remainingTimeMs,
+    });
+    const traceLabel = `trace=${traceContext.traceId}`;
+    this.deps.log.info(`[lcm] maintain: start ${traceLabel} ${sessionLabel}`);
     return this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
       async () => {
@@ -3078,7 +3392,7 @@ export class LcmContextEngine implements ContextEngine {
         );
         if (candidates.length === 0) {
           this.deps.log.info(
-            `[lcm] maintain: no transcript GC candidates conversation=${conversation.conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] maintain: no transcript GC candidates conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
           return {
             changed: false,
@@ -3116,7 +3430,7 @@ export class LcmContextEngine implements ContextEngine {
 
         if (replacements.length === 0) {
           this.deps.log.info(
-            `[lcm] maintain: no matching transcript entries conversation=${conversation.conversationId} ${sessionLabel} candidates=${candidates.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] maintain: no matching transcript entries conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} candidates=${candidates.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
           return {
             changed: false,
@@ -3131,20 +3445,32 @@ export class LcmContextEngine implements ContextEngine {
         });
 
         if (result.changed) {
-          try {
-            await this.refreshBootstrapState({
-              conversationId: conversation.conversationId,
-              sessionFile: params.sessionFile,
+          const refreshBootstrapState = async (): Promise<void> => {
+            try {
+              await this.refreshBootstrapState({
+                conversationId: conversation.conversationId,
+                sessionFile: params.sessionFile,
+              });
+            } catch (e) {
+              this.deps.log.warn(
+                `[lcm] Failed to update bootstrap checkpoint after maintain ${traceLabel}: ${describeLogError(e)}`,
+              );
+            }
+          };
+          if (traceContext.remainingTimeMs !== undefined) {
+            this.scheduleBackgroundWork({
+              label: "maintain: bootstrap checkpoint refresh",
+              traceId: traceContext.traceId,
+              remainingTimeMs: traceContext.remainingTimeMs,
+              work: refreshBootstrapState,
             });
-          } catch (e) {
-            this.deps.log.warn(
-              `[lcm] Failed to update bootstrap checkpoint after maintain: ${describeLogError(e)}`,
-            );
+          } else {
+            await refreshBootstrapState();
           }
         }
 
         this.deps.log.info(
-          `[lcm] maintain: done conversation=${conversation.conversationId} ${sessionLabel} candidates=${candidates.length} replacements=${replacements.length} changed=${result.changed} rewrittenEntries=${result.rewrittenEntries} bytesFreed=${result.bytesFreed} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          `[lcm] maintain: done conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} candidates=${candidates.length} replacements=${replacements.length} changed=${result.changed} rewrittenEntries=${result.rewrittenEntries} bytesFreed=${result.bytesFreed} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return result;
       },
@@ -3332,6 +3658,8 @@ export class LcmContextEngine implements ContextEngine {
     autoCompactionSummary?: string;
     isHeartbeat?: boolean;
     tokenBudget?: number;
+    traceId?: string;
+    remainingTimeMs?: number;
     /** OpenClaw runtime param name (preferred). */
     runtimeContext?: Record<string, unknown>;
     /** Back-compat param name. */
@@ -3349,6 +3677,18 @@ export class LcmContextEngine implements ContextEngine {
       `session=${params.sessionId}`,
       ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
     ].join(" ");
+    const traceContext = this.resolveLifecycleTraceContext({
+      traceId: params.traceId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      sessionFile: params.sessionFile,
+      messages: params.messages,
+      runtimeContext: asRecord(params.runtimeContext),
+      legacyParams: asRecord(params.legacyCompactionParams),
+      remainingTimeMs: params.remainingTimeMs,
+    });
+    const traceLabel = `trace=${traceContext.traceId}`;
+    this.deps.log.info(`[lcm] afterTurn: start ${traceLabel} ${sessionLabel}`);
 
     // Dedup guard: prevent duplicate ingestion when gateway restart replays
     // full history. Run on newMessages BEFORE prepending autoCompactionSummary
@@ -3371,7 +3711,7 @@ export class LcmContextEngine implements ContextEngine {
     ingestBatch.push(...dedupedNewMessages);
     if (ingestBatch.length === 0) {
       this.deps.log.info(
-        `[lcm] afterTurn: nothing to ingest ${sessionLabel} newMessages=${newMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] afterTurn: nothing to ingest ${sessionLabel} ${traceLabel} newMessages=${newMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       return;
     }
@@ -3386,7 +3726,7 @@ export class LcmContextEngine implements ContextEngine {
     } catch (err) {
       // Never compact a stale or partially ingested frontier.
       this.deps.log.error(
-        `[lcm] afterTurn: ingest failed, skipping compaction: ${describeLogError(err)}`,
+        `[lcm] afterTurn: ingest failed, skipping compaction ${traceLabel}: ${describeLogError(err)}`,
       );
       return;
     }
@@ -3412,18 +3752,18 @@ export class LcmContextEngine implements ContextEngine {
               });
             } catch (err) {
               this.deps.log.warn(
-                `[lcm] afterTurn: heartbeat pruning checkpoint refresh failed for ${sessionContext}: ${describeLogError(err)}`,
+                `[lcm] afterTurn: heartbeat pruning checkpoint refresh failed for ${sessionContext} ${traceLabel}: ${describeLogError(err)}`,
               );
             }
             this.deps.log.info(
-              `[lcm] afterTurn: pruned ${pruned} heartbeat ack messages for ${sessionContext}`,
+              `[lcm] afterTurn: pruned ${pruned} heartbeat ack messages for ${sessionContext} ${traceLabel}`,
             );
             return;
           }
         }
       } catch (err) {
         this.deps.log.warn(
-          `[lcm] afterTurn: heartbeat pruning failed: ${describeLogError(err)}`,
+          `[lcm] afterTurn: heartbeat pruning failed ${traceLabel}: ${describeLogError(err)}`,
         );
       }
     }
@@ -3438,7 +3778,7 @@ export class LcmContextEngine implements ContextEngine {
     const tokenBudget = this.applyAssemblyBudgetCap(resolvedTokenBudget ?? DEFAULT_AFTER_TURN_TOKEN_BUDGET);
     if (resolvedTokenBudget === undefined) {
       this.deps.log.warn(
-        `[lcm] afterTurn: tokenBudget not provided; using default ${DEFAULT_AFTER_TURN_TOKEN_BUDGET}`,
+        `[lcm] afterTurn: tokenBudget not provided; using default ${DEFAULT_AFTER_TURN_TOKEN_BUDGET} ${traceLabel}`,
       );
     }
 
@@ -3449,7 +3789,7 @@ export class LcmContextEngine implements ContextEngine {
     });
     if (!conversation) {
       this.deps.log.info(
-        `[lcm] afterTurn: conversation lookup missed ${sessionLabel} ingestBatch=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] afterTurn: conversation lookup missed ${sessionLabel} ${traceLabel} ingestBatch=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       return;
     }
@@ -3464,7 +3804,7 @@ export class LcmContextEngine implements ContextEngine {
       });
     } catch (err) {
       this.deps.log.warn(
-        `[lcm] afterTurn: compaction telemetry update failed: ${describeLogError(err)}`,
+        `[lcm] afterTurn: compaction telemetry update failed ${traceLabel}: ${describeLogError(err)}`,
       );
     }
 
@@ -3475,20 +3815,26 @@ export class LcmContextEngine implements ContextEngine {
         currentTokenCount: liveContextTokens,
       });
       if (leafDecision.shouldCompact) {
-        this.compactLeafAsync({
-          sessionId: params.sessionId,
-          sessionKey: params.sessionKey,
-          sessionFile: params.sessionFile,
-          tokenBudget,
-          currentTokenCount: liveContextTokens,
-          legacyParams,
-          maxPasses: leafDecision.maxPasses,
-          leafChunkTokens: leafDecision.leafChunkTokens,
-          fallbackLeafChunkTokens: leafDecision.fallbackLeafChunkTokens,
-          activityBand: leafDecision.activityBand,
-          allowCondensedPasses: leafDecision.allowCondensedPasses,
-        }).catch(() => {
-          // Leaf compaction is best-effort and should not fail the caller.
+        this.scheduleBackgroundWork({
+          label: "afterTurn: leaf compaction",
+          traceId: traceContext.traceId,
+          remainingTimeMs: traceContext.remainingTimeMs,
+          work: async () => {
+            await this.compactLeafAsync({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              sessionFile: params.sessionFile,
+              tokenBudget,
+              currentTokenCount: liveContextTokens,
+              legacyParams,
+              maxPasses: leafDecision.maxPasses,
+              leafChunkTokens: leafDecision.leafChunkTokens,
+              fallbackLeafChunkTokens: leafDecision.fallbackLeafChunkTokens,
+              activityBand: leafDecision.activityBand,
+              allowCondensedPasses: leafDecision.allowCondensedPasses,
+              traceId: traceContext.traceId,
+            });
+          },
         });
       }
     } catch {
@@ -3496,21 +3842,29 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     try {
-      await this.compact({
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        sessionFile: params.sessionFile,
-        tokenBudget,
-        currentTokenCount: liveContextTokens,
-        compactionTarget: "threshold",
-        legacyParams,
+      this.scheduleBackgroundWork({
+        label: "afterTurn: threshold compaction",
+        traceId: traceContext.traceId,
+        remainingTimeMs: traceContext.remainingTimeMs,
+        work: async () => {
+          await this.compact({
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            sessionFile: params.sessionFile,
+            tokenBudget,
+            currentTokenCount: liveContextTokens,
+            compactionTarget: "threshold",
+            legacyParams,
+            traceId: traceContext.traceId,
+          });
+        },
       });
     } catch {
       // Proactive compaction is best-effort in the post-turn lifecycle.
     }
 
     this.deps.log.info(
-      `[lcm] afterTurn: done conversation=${conversation.conversationId} ${sessionLabel} newMessages=${newMessages.length} dedupedMessages=${dedupedNewMessages.length} ingestedMessages=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+      `[lcm] afterTurn: done conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} newMessages=${newMessages.length} dedupedMessages=${dedupedNewMessages.length} ingestedMessages=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
     );
   }
 
@@ -3519,6 +3873,7 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     messages: AgentMessage[];
     tokenBudget?: number;
+    traceId?: string;
     /** Optional user query for relevance-based eviction (BM25-lite). When absent or unsearchable, falls back to chronological eviction. */
     prompt?: string;
   }): Promise<AssembleResult> {
@@ -3528,6 +3883,13 @@ export class LcmContextEngine implements ContextEngine {
         estimatedTokens: 0,
       };
     }
+    const traceContext = this.resolveLifecycleTraceContext({
+      traceId: params.traceId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      messages: params.messages,
+    });
+    const traceLabel = `trace=${traceContext.traceId}`;
     try {
       this.ensureMigrated();
       const startedAt = Date.now();
@@ -3535,6 +3897,7 @@ export class LcmContextEngine implements ContextEngine {
         `session=${params.sessionId}`,
         ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
       ].join(" ");
+      this.deps.log.info(`[lcm] assemble: start ${traceLabel} ${sessionLabel}`);
 
       const conversation = await this.conversationStore.getConversationForSession({
         sessionId: params.sessionId,
@@ -3542,7 +3905,7 @@ export class LcmContextEngine implements ContextEngine {
       });
       if (!conversation) {
         this.deps.log.info(
-          `[lcm] assemble: conversation lookup missed ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          `[lcm] assemble: conversation lookup missed ${sessionLabel} ${traceLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return {
           messages: params.messages,
@@ -3553,7 +3916,7 @@ export class LcmContextEngine implements ContextEngine {
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);
       if (contextItems.length === 0) {
         this.deps.log.info(
-          `[lcm] assemble: no context items conversation=${conversation.conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          `[lcm] assemble: no context items conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return {
           messages: params.messages,
@@ -3567,7 +3930,7 @@ export class LcmContextEngine implements ContextEngine {
       const hasSummaryItems = contextItems.some((item) => item.itemType === "summary");
       if (!hasSummaryItems && contextItems.length < params.messages.length) {
         this.deps.log.info(
-          `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return {
           messages: params.messages,
@@ -3594,7 +3957,7 @@ export class LcmContextEngine implements ContextEngine {
       // fail safe to the live context.
       if (assembled.messages.length === 0 && params.messages.length > 0) {
         this.deps.log.info(
-          `[lcm] assemble: empty assembled output, using live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} tokenBudget=${tokenBudget} duration=${formatDurationMs(Date.now() - startedAt)}`,
+          `[lcm] assemble: empty assembled output, using live context conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} contextItems=${contextItems.length} tokenBudget=${tokenBudget} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return {
           messages: params.messages,
@@ -3603,7 +3966,7 @@ export class LcmContextEngine implements ContextEngine {
       }
 
       this.deps.log.info(
-        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} ${traceLabel} contextItems=${contextItems.length} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
 
       const result: AssembleResultWithSystemPrompt = {
@@ -3616,7 +3979,7 @@ export class LcmContextEngine implements ContextEngine {
       return result;
     } catch (err) {
       this.deps.log.info(
-        `[lcm] assemble: failed for session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} error=${describeLogError(err)}`,
+        `[lcm] assemble: failed for session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} ${traceLabel} error=${describeLogError(err)}`,
       );
       return {
         messages: params.messages,
@@ -3658,6 +4021,7 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     sessionFile: string;
     tokenBudget?: number;
+    traceId?: string;
     currentTokenCount?: number;
     customInstructions?: string;
     /** OpenClaw runtime param name (preferred). */
@@ -3711,6 +4075,15 @@ export class LcmContextEngine implements ContextEngine {
             reason: "missing token budget in compact params",
           };
         }
+        const traceContext = this.resolveLifecycleTraceContext({
+          traceId: params.traceId,
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+          sessionFile: params.sessionFile,
+          runtimeContext: asRecord(params.runtimeContext),
+          legacyParams,
+        });
+        const traceLabel = `trace=${traceContext.traceId}`;
 
         const lp = legacyParams ?? {};
         const observedTokens = this.normalizeObservedTokenCount(
@@ -3756,7 +4129,7 @@ export class LcmContextEngine implements ContextEngine {
             ? Math.floor(params.leafChunkTokens)
             : fallbackLeafChunkTokens[0];
         this.deps.log.info(
-          `[lcm] compactLeafAsync start: conversation=${conversation.conversationId} session=${params.sessionId} leafChunkTokens=${activeLeafChunkTokens ?? "null"} fallbackLeafChunkTokens=${fallbackLeafChunkTokens.join(",")} maxPasses=${maxPasses} activityBand=${params.activityBand ?? "unknown"} allowCondensedPasses=${params.allowCondensedPasses !== false}`,
+          `[lcm] compactLeafAsync start: conversation=${conversation.conversationId} session=${params.sessionId} ${traceLabel} leafChunkTokens=${activeLeafChunkTokens ?? "null"} fallbackLeafChunkTokens=${fallbackLeafChunkTokens.join(",")} maxPasses=${maxPasses} activityBand=${params.activityBand ?? "unknown"} allowCondensedPasses=${params.allowCondensedPasses !== false}`,
         );
 
         let rounds = 0;
@@ -3823,7 +4196,7 @@ export class LcmContextEngine implements ContextEngine {
 
         const tokensBefore = observedTokens ?? storedTokensBefore;
         this.deps.log.debug(
-          `[lcm] compactLeafAsync result: conversation=${conversation.conversationId} session=${params.sessionId} rounds=${rounds} compacted=${rounds > 0} authFailure=${authFailure} finalLeafChunkTokens=${activeLeafChunkTokens ?? "null"} finalTokens=${finalTokens}`,
+          `[lcm] compactLeafAsync result: conversation=${conversation.conversationId} session=${params.sessionId} ${traceLabel} rounds=${rounds} compacted=${rounds > 0} authFailure=${authFailure} finalLeafChunkTokens=${activeLeafChunkTokens ?? "null"} finalTokens=${finalTokens}`,
         );
 
         return {
@@ -3854,6 +4227,7 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     sessionFile: string;
     tokenBudget?: number;
+    traceId?: string;
     currentTokenCount?: number;
     compactionTarget?: "budget" | "threshold";
     customInstructions?: string;

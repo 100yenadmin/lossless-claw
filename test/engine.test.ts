@@ -253,6 +253,10 @@ async function ingestAndReadStoredContent(params: {
   return messages[0].content;
 }
 
+async function flushImmediate(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 afterEach(() => {
   closeLcmConnection();
   resetDelegatedExpansionGrantsForTests();
@@ -1903,6 +1907,149 @@ describe("LcmContextEngine.ingest content extraction", () => {
     });
   });
 
+  it("maintain() defers bootstrap checkpoint refresh when a remaining-time budget is supplied", async () => {
+    await withTempHome(async () => {
+      const engine = createEngineWithConfig({ largeFileTokenThreshold: 20 });
+      const sessionId = randomUUID();
+      const sessionFile = createSessionFilePath("transcript-gc-maintain-budget");
+      const toolOutput = `${"tool output line\n".repeat(80)}done`;
+
+      const sm = SessionManager.open(sessionFile);
+      sm.appendMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_gc_budget",
+            name: "exec",
+            arguments: { cmd: "pwd" },
+          },
+        ],
+      } as AgentMessage);
+      sm.appendMessage({
+        role: "toolResult",
+        toolCallId: "call_gc_budget",
+        toolName: "exec",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_gc_budget",
+            name: "exec",
+            content: [{ type: "text", text: toolOutput }],
+          },
+        ],
+      } as AgentMessage);
+      sm.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+      } as AgentMessage);
+
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_gc_budget",
+              name: "exec",
+              input: { cmd: "pwd" },
+            },
+          ],
+        } as AgentMessage,
+      });
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "toolResult",
+          toolCallId: "call_gc_budget",
+          toolName: "exec",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_gc_budget",
+              name: "exec",
+              content: [{ type: "text", text: toolOutput }],
+            },
+          ],
+        } as AgentMessage,
+      });
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+        } as AgentMessage,
+      });
+
+      const conversation = await engine
+        .getConversationStore()
+        .getConversationBySessionId(sessionId);
+      expect(conversation).not.toBeNull();
+
+      const toolMessage = await engine
+        .getConversationStore()
+        .getMessages(conversation!.conversationId);
+      const summaryId = `sum_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      await engine.getSummaryStore().insertSummary({
+        summaryId,
+        conversationId: conversation!.conversationId,
+        kind: "leaf",
+        content: "summarized tool output",
+        tokenCount: 16,
+      });
+      await engine.getSummaryStore().linkSummaryToMessages(summaryId, [toolMessage[1]!.messageId]);
+      await engine.getSummaryStore().replaceContextRangeWithSummary({
+        conversationId: conversation!.conversationId,
+        startOrdinal: 1,
+        endOrdinal: 1,
+        summaryId,
+      });
+
+      const rewriteTranscriptEntries = vi.fn(async () => ({
+        changed: true,
+        bytesFreed: 123,
+        rewrittenEntries: 1,
+      }));
+      const refreshBootstrapStateSpy = vi
+        .spyOn(engine as any, "refreshBootstrapState")
+        .mockResolvedValue(undefined);
+
+      await engine.maintain({
+        sessionId,
+        sessionFile,
+        remainingTimeMs: 1,
+        runtimeContext: {
+          rewriteTranscriptEntries,
+        },
+      });
+
+      expect(refreshBootstrapStateSpy).not.toHaveBeenCalled();
+      await flushImmediate();
+      expect(refreshBootstrapStateSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("bootstrap() defers post-bootstrap pruning when a remaining-time budget is supplied", async () => {
+    const engine = createEngineWithConfig({ pruneHeartbeatOk: true });
+    const sessionId = randomUUID();
+    const sessionFile = createSessionFilePath("bootstrap-prune-budget");
+    writeFileSync(sessionFile, "", "utf8");
+    const pruneHeartbeatOkTurnsSpy = vi
+      .spyOn(engine as any, "pruneHeartbeatOkTurns")
+      .mockResolvedValue(0);
+
+    await engine.bootstrap({
+      sessionId,
+      sessionFile,
+      remainingTimeMs: 1,
+    });
+
+    expect(pruneHeartbeatOkTurnsSpy).not.toHaveBeenCalled();
+    await flushImmediate();
+    expect(pruneHeartbeatOkTurnsSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("serializes recycled session writes by stable sessionKey", async () => {
     const engine = createEngine();
     const sessionKey = "agent:main:main";
@@ -2000,6 +2147,38 @@ describe("LcmContextEngine connection lifecycle", () => {
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 
 describe("LcmContextEngine.bootstrap", () => {
+  it("logs fast-path miss reasons and bootstrap step timings before full transcript reads", async () => {
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = createEngineWithDepsOverrides({ log });
+    const sessionFile = createSessionFilePath("bootstrap-fast-path-miss");
+    writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "hello bootstrap" }],
+      })}\n`,
+      "utf8",
+    );
+
+    await engine.bootstrap({
+      sessionId: randomUUID(),
+      sessionFile,
+      traceId: "bootstrap-trace",
+    });
+
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("trace=bootstrap-trace"));
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("bootstrap: checkpoint miss"));
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining("bootstrap: append-only fast-path miss"),
+    );
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("bootstrap: step timings"));
+  });
+
   it("imports only active leaf-path messages from SessionManager context", async () => {
     const sessionFile = createSessionFilePath("branched");
     const sm = SessionManager.open(sessionFile);
@@ -4066,6 +4245,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
     expect(evaluateLeafTriggerSpy).toHaveBeenCalledWith(expect.any(Number));
     expect(compactLeafAsyncSpy).not.toHaveBeenCalled();
+    await flushImmediate();
     expect(compactSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId,
@@ -4120,6 +4300,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       runtimeContext,
     });
 
+    await flushImmediate();
     expect(compactLeafAsyncSpy).toHaveBeenCalled();
     expect((compactLeafAsyncSpy.mock.calls[0]?.[0] as { tokenBudget?: unknown }).tokenBudget).toBe(2048);
     expect((compactLeafAsyncSpy.mock.calls[0]?.[0] as { legacyParams?: unknown }).legacyParams).toBe(
@@ -4178,6 +4359,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       prePromptMessageCount: 0,
     });
 
+    await flushImmediate();
     expect(compactSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId,
@@ -4186,7 +4368,9 @@ describe("LcmContextEngine fidelity and token budget", () => {
       }),
     );
     expect(warnLog).toHaveBeenCalledWith(
-      "[lcm] afterTurn: tokenBudget not provided; using default 128000",
+      expect.stringContaining(
+        "[lcm] afterTurn: tokenBudget not provided; using default 128000",
+      ),
     );
   });
 
@@ -4244,6 +4428,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       legacyCompactionParams,
     });
 
+    await flushImmediate();
     expect(compactLeafAsyncSpy).toHaveBeenCalled();
     expect((compactLeafAsyncSpy.mock.calls[0]?.[0] as { legacyParams?: unknown }).legacyParams).toBe(
       legacyCompactionParams,
@@ -4301,6 +4486,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       legacyCompactionParams,
     });
 
+    await flushImmediate();
     expect((compactSpy.mock.calls[0]?.[0] as { legacyParams?: unknown }).legacyParams).toBe(
       runtimeContext,
     );
@@ -4610,6 +4796,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       },
     });
 
+    await flushImmediate();
     expect(compactLeafAsyncSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId,
@@ -4680,6 +4867,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       tokenBudget: 128_000,
     });
 
+    await flushImmediate();
     expect(compactLeafAsyncSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId,
@@ -4772,6 +4960,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       },
     });
 
+    await flushImmediate();
     expect(compactLeafAsyncSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId,
@@ -4884,7 +5073,9 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(compactLeafAsyncSpy).not.toHaveBeenCalled();
     expect(compactSpy).not.toHaveBeenCalled();
     expect(errorLog).toHaveBeenCalledWith(
-      "[lcm] afterTurn: ingest failed, skipping compaction: ingest exploded",
+      expect.stringContaining(
+        "[lcm] afterTurn: ingest failed, skipping compaction",
+      ),
     );
   });
 
