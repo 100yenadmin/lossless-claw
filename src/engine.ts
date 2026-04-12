@@ -1623,7 +1623,11 @@ export class LcmContextEngine implements ContextEngine {
     if (!ttlMs) {
       return false;
     }
-    const touchAt = telemetry?.lastCacheTouchAt ?? telemetry?.lastObservedCacheHitAt ?? null;
+    const touchAt =
+      telemetry?.lastCacheTouchAt
+      ?? telemetry?.lastObservedCacheHitAt
+      ?? telemetry?.lastApiCallAt
+      ?? null;
     if (!touchAt) {
       return false;
     }

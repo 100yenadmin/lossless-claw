@@ -5067,6 +5067,49 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(maintenanceResult.changed).toBe(false);
   });
 
+  it("maintain() treats a recent Anthropic API call as a hot-cache touch when explicit cache telemetry is absent", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      evaluateIncrementalCompaction: (params: unknown) => Promise<unknown>;
+    };
+    const sessionId = "maintain-deferred-compaction-recent-api-call";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "leaf-trigger",
+      tokenBudget: 4_096,
+      currentTokenCount: 42,
+    });
+    await engine.getCompactionTelemetryStore().upsertConversationCompactionTelemetry({
+      conversationId: conversation.conversationId,
+      cacheState: "unknown",
+      retention: "short",
+      lastApiCallAt: new Date(),
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+
+    const evaluateIncrementalCompactionSpy = vi.spyOn(privateEngine, "evaluateIncrementalCompaction");
+
+    const maintenanceResult = await engine.maintain({
+      sessionId,
+      sessionFile: createSessionFilePath("maintain-deferred-compaction-recent-api-call"),
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+      },
+    });
+
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(maintenance?.pending).toBe(true);
+    expect(maintenance?.running).toBe(false);
+    expect(evaluateIncrementalCompactionSpy).not.toHaveBeenCalled();
+    expect(maintenanceResult.changed).toBe(false);
+  });
+
   it("maintain() keeps deferred leaf debt pending when compaction hits an auth failure", async () => {
     const engine = createEngine();
     const privateEngine = engine as unknown as {
