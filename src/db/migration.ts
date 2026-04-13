@@ -938,6 +938,25 @@ export function runLcmMigrations(
         ON summaries (conversation_id, kind) WHERE kind = 'leaf';
     `);
   });
+  runMigrationStep("ensureRollupTrackerTables", log, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lcm_rollup_trackers (
+        tracker_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('blocker', 'open_item', 'decision', 'question')),
+        content TEXT NOT NULL,
+        source_rollup_id TEXT REFERENCES lcm_rollups(rollup_id),
+        source_day TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'stale')),
+        resolved_day TEXT,
+        resolved_rollup_id TEXT REFERENCES lcm_rollups(rollup_id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS lcm_trackers_conv_status_idx
+        ON lcm_rollup_trackers (conversation_id, status, kind);
+    `);
+  });
   runMigrationStep("ensureRollupViews", log, () => {
     db.exec(`
       CREATE VIEW IF NOT EXISTS daily_rollups AS
@@ -946,6 +965,27 @@ export function runLcmMigrations(
         SELECT * FROM lcm_rollups WHERE period_kind = 'week';
       CREATE VIEW IF NOT EXISTS monthly_rollups AS
         SELECT * FROM lcm_rollups WHERE period_kind = 'month';
+    `);
+  });
+  runMigrationStep("ensureEpisodeTables", log, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lcm_episodes (
+        episode_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'stale')),
+        first_day TEXT NOT NULL,
+        last_day TEXT NOT NULL,
+        keywords TEXT NOT NULL DEFAULT '[]',
+        rollup_ids TEXT NOT NULL DEFAULT '[]',
+        day_count INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS lcm_episodes_conv_status_idx
+        ON lcm_episodes (conversation_id, status);
+      CREATE INDEX IF NOT EXISTS lcm_episodes_conv_days_idx
+        ON lcm_episodes (conversation_id, first_day, last_day);
     `);
   });
 
