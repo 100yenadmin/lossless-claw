@@ -37,3 +37,12 @@ export type {
   ConversationCompactionTelemetryRecord,
   UpsertConversationCompactionTelemetryInput,
 } from "./compaction-telemetry-store.js";
+
+export { RollupStore } from "./rollup-store.js";
+export type {
+  RollupRow,
+  RollupStateRow,
+  RollupSourceRow,
+  RollupSourceInput,
+  LeafSummaryForDayRow,
+} from "./rollup-store.js";
