@@ -1,4 +1,8 @@
 import * as crypto from "node:crypto";
+import { extractTrackersFromRollup } from "./tracker-extractor.js";
+import { EpisodeDetector } from "./episode-detector.js";
+import { EpisodeStore } from "./store/episode-store.js";
+import { TrackerStore } from "./store/tracker-store.js";
 import { withDatabaseTransaction } from "./transaction-mutex.js";
 import type { LeafSummaryForDayRow, RollupRow, RollupStateRow, RollupStore } from "./store/rollup-store.js";
 
@@ -147,6 +151,13 @@ export class RollupBuilder {
       }
     }
 
+    try {
+      const episodeDetector = new EpisodeDetector(this.store, new EpisodeStore(this.store.db));
+      episodeDetector.syncConversationEpisodes(conversationId, now);
+    } catch (error) {
+      result.errors.push(`episode sync failed: ${formatError(error)}`);
+    }
+
     return result;
   }
 
@@ -250,6 +261,14 @@ export class RollupBuilder {
         last_daily_build_at: builtAt.toISOString(),
         last_rollup_check_at: builtAt.toISOString(),
         pending_rebuild: 0,
+      });
+
+      extractTrackersFromRollup({
+        conversationId,
+        dateKey,
+        rollupId,
+        rollupContent: draft.content,
+        trackerStore: new TrackerStore(this.store.db),
       });
     });
 

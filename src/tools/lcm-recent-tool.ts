@@ -2,17 +2,26 @@ import { Type } from "@sinclair/typebox";
 import type { DatabaseSync } from "node:sqlite";
 import { formatTimestamp } from "../compaction.js";
 import type { LcmContextEngine } from "../engine.js";
+import { EpisodeStore } from "../store/episode-store.js";
 import { RollupStore } from "../store/rollup-store.js";
+import { TrackerStore, type TrackerKind } from "../store/tracker-store.js";
 import type { LcmDependencies } from "../types.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
 import { parseIsoTimestampParam, resolveLcmConversationScope } from "./lcm-conversation-scope.js";
 
 const LcmRecentSchema = Type.Object({
-  period: Type.String({
-    description:
-      'Time period: "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD"',
-  }),
+  period: Type.Optional(
+    Type.String({
+      description:
+        'Time period: "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "open_items", "blockers", "episodes", "episode:keyword", "Nh" (up to 72h, e.g. "6h"), or "date:YYYY-MM-DD"',
+    }),
+  ),
+  topic: Type.Optional(
+    Type.String({
+      description: "Filter results to a specific topic or keyword",
+    }),
+  ),
   conversationId: Type.Optional(
     Type.Number({
       description: "Conversation ID. Defaults to current session.",
@@ -69,6 +78,9 @@ type PeriodResolution = {
   label: string;
   kind?: RollupPeriodKind;
   periodKey?: string;
+  trackerKind?: TrackerKind;
+  episodeKeyword?: string;
+  mode?: "rollup" | "episodes" | "episode";
   start: Date;
   end: Date;
 };
@@ -169,10 +181,45 @@ function startOfMonthDayString(dayString: string): string {
   return `${year}-${month}-01`;
 }
 
+function getUtcDateForZonedTime(
+  dayString: string,
+  timezone: string,
+  hour: number,
+  minute = 0,
+  second = 0,
+  millisecond = 0,
+): Date {
+  const startOfDay = getUtcDateForZonedMidnight(dayString, timezone);
+  return new Date(startOfDay.getTime() + ((((hour * 60) + minute) * 60) + second) * 1000 + millisecond);
+}
+
 function resolvePeriod(period: string, timezone: string): PeriodResolution {
   const normalized = period.trim().toLowerCase();
   const now = new Date();
   const today = getZonedDayString(now, timezone);
+
+  if (normalized === "episodes") {
+    return {
+      label: "episodes",
+      mode: "episodes",
+      start: now,
+      end: now,
+    };
+  }
+
+  if (normalized.startsWith("episode:")) {
+    const keyword = period.trim().slice("episode:".length).trim();
+    if (!keyword) {
+      throw new Error('period "episode:keyword" requires a non-empty keyword.');
+    }
+    return {
+      label: `episode: ${keyword}`,
+      mode: "episode",
+      episodeKeyword: keyword,
+      start: now,
+      end: now,
+    };
+  }
 
   if (normalized === "today") {
     const start = getUtcDateForZonedMidnight(today, timezone);
@@ -185,6 +232,46 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
     const start = getUtcDateForZonedMidnight(day, timezone);
     const end = getUtcDateForZonedMidnight(today, timezone);
     return { label: "yesterday", kind: "day", periodKey: day, start, end };
+  }
+
+  if (normalized === "morning") {
+    return {
+      label: "this morning",
+      start: getUtcDateForZonedTime(today, timezone, 6),
+      end: getUtcDateForZonedTime(today, timezone, 12),
+    };
+  }
+
+  if (normalized === "afternoon") {
+    return {
+      label: "this afternoon",
+      start: getUtcDateForZonedTime(today, timezone, 12),
+      end: getUtcDateForZonedTime(today, timezone, 18),
+    };
+  }
+
+  if (normalized === "evening") {
+    return {
+      label: "this evening",
+      start: getUtcDateForZonedTime(today, timezone, 18),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
+  const hoursMatch = normalized.match(/^(\d+)h$/);
+  if (hoursMatch) {
+    const hours = Number(hoursMatch[1]);
+    if (!Number.isInteger(hours) || hours < 1) {
+      throw new Error('period hours must be a positive integer in the form "Nh".');
+    }
+    if (hours > 72) {
+      throw new Error('period hours must be 72h or less. Use day-based syntax like "7d" for longer ranges.');
+    }
+    return {
+      label: `last ${hours} hour${hours === 1 ? "" : "s"}`,
+      start: new Date(now.getTime() - hours * 60 * 60 * 1000),
+      end: now,
+    };
   }
 
   if (normalized.startsWith("date:")) {
@@ -217,6 +304,26 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
     };
   }
 
+  if (normalized === "open_items") {
+    const weekStartDay = startOfWeekDayString(today);
+    return {
+      label: "open items this week",
+      trackerKind: "open_item",
+      start: getUtcDateForZonedMidnight(weekStartDay, timezone),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
+  if (normalized === "blockers") {
+    const weekStartDay = startOfWeekDayString(today);
+    return {
+      label: "blockers this week",
+      trackerKind: "blocker",
+      start: getUtcDateForZonedMidnight(weekStartDay, timezone),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
   if (normalized === "week") {
     const weekStartDay = startOfWeekDayString(today);
     const start = getUtcDateForZonedMidnight(weekStartDay, timezone);
@@ -244,8 +351,18 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
   }
 
   throw new Error(
-    'period must be one of "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD".',
+    'period must be one of "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "open_items", "blockers", "episodes", "episode:keyword", "Nh" (up to 72h), or "date:YYYY-MM-DD".',
   );
+}
+
+function formatDayRange(firstDay: string, lastDay: string): string {
+  return firstDay === lastDay ? firstDay : `${firstDay} → ${lastDay}`;
+}
+
+function formatDaysOpen(sourceDay: string): number {
+  const started = new Date(`${sourceDay}T00:00:00.000Z`);
+  const diffMs = Date.now() - started.getTime();
+  return Math.max(0, Math.floor(diffMs / 86_400_000));
 }
 
 function formatSourcesLine(summaryIds: string[], includeSources: boolean): string {
@@ -270,12 +387,52 @@ function combineRollups(rollups: RollupRecord[]): {
   return { content, tokenCount, status, sourceSummaryIds };
 }
 
+function filterRollupContentByTopic(content: string, topic: string): string {
+  const normalizedTopic = topic.trim().toLowerCase();
+  if (!normalizedTopic) {
+    return content;
+  }
+
+  const lines = content.split(/\r?\n/);
+  const includeIndexes = new Set<number>();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.toLowerCase().includes(normalizedTopic)) {
+      includeIndexes.add(index - 1);
+      includeIndexes.add(index);
+      includeIndexes.add(index + 1);
+    }
+  }
+
+  const validIndexes = [...includeIndexes]
+    .filter((index) => index >= 0 && index < lines.length)
+    .sort((a, b) => a - b);
+
+  if (validIndexes.length === 0) {
+    return "No matching topic lines found in this rollup.";
+  }
+
+  const filtered: string[] = [];
+  let previousIndex: number | null = null;
+  for (const index of validIndexes) {
+    if (previousIndex !== null && index > previousIndex + 1) {
+      filtered.push("...");
+    }
+    filtered.push(lines[index] ?? "");
+    previousIndex = index;
+  }
+
+  return filtered.join("\n").trim();
+}
+
 function getRecentSummaryFallback(
   db: DatabaseSync,
   conversationId: number,
   start: Date,
   end: Date,
+  topic?: string,
 ): RecentSummaryFallbackRow[] {
+  const hasTopic = typeof topic === "string" && topic.trim().length > 0;
   return db
     .prepare(
       `SELECT
@@ -290,10 +447,15 @@ function getRecentSummaryFallback(
          AND kind = 'leaf'
          AND coalesce(latest_at, earliest_at, created_at) >= ?
          AND coalesce(latest_at, earliest_at, created_at) < ?
+         ${hasTopic ? "AND lower(content) LIKE '%' || ? || '%'" : ""}
        ORDER BY coalesce(latest_at, earliest_at, created_at) DESC
        LIMIT 20`,
     )
-    .all(conversationId, start.toISOString(), end.toISOString()) as unknown as RecentSummaryFallbackRow[];
+    .all(
+      ...(hasTopic
+        ? [conversationId, start.toISOString(), end.toISOString(), topic!.trim().toLowerCase()]
+        : [conversationId, start.toISOString(), end.toISOString()]),
+    ) as unknown as RecentSummaryFallbackRow[];
 }
 
 export function createLcmRecentTool(input: {
@@ -320,6 +482,7 @@ export function createLcmRecentTool(input: {
       const includeSources = p.includeSources === true;
       const timezone = lcm.timezone;
       const retrieval = lcm.getRetrieval();
+      const topic = typeof p.topic === "string" ? p.topic.trim() : "";
       const conversationScope = await resolveLcmConversationScope({
         lcm,
         deps: input.deps,
@@ -335,9 +498,11 @@ export function createLcmRecentTool(input: {
         });
       }
 
+      const requestedPeriod = typeof p.period === "string" && p.period.trim().length > 0 ? p.period.trim() : undefined;
+
       let resolution: PeriodResolution;
       try {
-        resolution = resolvePeriod(String(p.period ?? ""), timezone);
+        resolution = resolvePeriod(requestedPeriod ?? (topic ? "7d" : ""), timezone);
       } catch (error) {
         return jsonResult({
           error: error instanceof Error ? error.message : "Invalid period.",
@@ -353,7 +518,7 @@ export function createLcmRecentTool(input: {
 
       if (conversationScope.allConversations) {
         const fallback = await retrieval.grep({
-          query: "",
+          query: topic || "",
           mode: "full_text",
           scope: "both",
           conversationId: undefined,
@@ -364,7 +529,7 @@ export function createLcmRecentTool(input: {
         });
 
         const lines: string[] = [];
-        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(`## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`);
         lines.push(
           `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
         );
@@ -411,22 +576,132 @@ export function createLcmRecentTool(input: {
 
       const db = getLcmDatabase(lcm);
       const rollupStore = input.rollupStore ?? new RollupStore(db);
+      const trackerStore = new TrackerStore(db);
+      const episodeStore = new EpisodeStore(db);
       const conversationId = conversationScope.conversationId as number;
+
+      if (resolution.mode === "episodes") {
+        const episodes = episodeStore.getActiveEpisodes(conversationId);
+        const lines: string[] = [];
+        lines.push("## Active Episodes");
+        lines.push(`**Conversation:** ${conversationId}`);
+        lines.push(`**Count:** ${episodes.length}`);
+        lines.push("");
+        if (episodes.length === 0) {
+          lines.push("No active or stale episodes found.");
+        } else {
+          for (const episode of episodes) {
+            const keywords = parseJsonStringArray(episode.keywords);
+            lines.push(`### ${episode.title}`);
+            lines.push(`- Status: ${episode.status}`);
+            lines.push(`- Duration: ${episode.day_count} day(s)`);
+            lines.push(`- Days: ${formatDayRange(episode.first_day, episode.last_day)}`);
+            lines.push(`- Last activity: ${episode.last_day}`);
+            lines.push(`- Keywords: ${keywords.length > 0 ? keywords.join(", ") : "None"}`);
+            lines.push("");
+          }
+        }
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            episodeCount: episodes.length,
+          },
+        };
+      }
+
+      if (resolution.mode === "episode") {
+        const episode = episodeStore.searchEpisodes(conversationId, resolution.episodeKeyword ?? "")[0] ?? null;
+        if (!episode) {
+          return jsonResult({ error: `No episode matched keyword \"${resolution.episodeKeyword}\".` });
+        }
+
+        const rollups = parseJsonStringArray(episode.rollup_ids)
+          .map((rollupId) => rollupStore.getRollupById(rollupId))
+          .filter((rollup): rollup is NonNullable<typeof rollup> => Boolean(rollup))
+          .sort((left, right) => left.period_key.localeCompare(right.period_key));
+        const keywords = parseJsonStringArray(episode.keywords);
+        const lines: string[] = [];
+        lines.push(`## Episode: ${episode.title}`);
+        lines.push(`**Status:** ${episode.status}`);
+        lines.push(`**Duration:** ${episode.day_count} day(s)`);
+        lines.push(`**Days:** ${formatDayRange(episode.first_day, episode.last_day)}`);
+        lines.push(`**Keywords:** ${keywords.length > 0 ? keywords.join(", ") : "None"}`);
+        lines.push("");
+        if (rollups.length === 0) {
+          lines.push("No rollups were attached to this episode.");
+        } else {
+          lines.push("## Day-by-day rollups");
+          lines.push("");
+          for (const rollup of rollups) {
+            lines.push(`### ${rollup.period_key}`);
+            lines.push(rollup.content.trim());
+            lines.push("");
+          }
+        }
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            episodeId: episode.episode_id,
+            rollupCount: rollups.length,
+          },
+        };
+      }
+
+      if (resolution.trackerKind) {
+        const startDay = getZonedDayString(resolution.start, timezone);
+        const openTrackers = trackerStore
+          .getOpenTrackers(conversationId, resolution.trackerKind)
+          .filter((tracker) => tracker.source_day >= startDay);
+
+        const lines: string[] = [];
+        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(
+          `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
+        );
+        lines.push("**Status:** ready");
+        lines.push(`**Open items:** ${openTrackers.length}`);
+        lines.push("");
+        if (openTrackers.length === 0) {
+          lines.push("No open tracked items found for this period.");
+        } else {
+          for (const tracker of openTrackers) {
+            lines.push(
+              `- [${tracker.kind}] opened ${tracker.source_day} (${formatDaysOpen(tracker.source_day)}d open): ${tracker.content}`,
+            );
+          }
+        }
+        lines.push("");
+        lines.push("---");
+        lines.push("*Sources: tracker state*");
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            trackerKind: resolution.trackerKind,
+            totalOpen: openTrackers.length,
+          },
+        };
+      }
 
       let rollupContent: string | null = null;
       let tokenCount = 0;
       let status: "ready" | "stale" | "fallback" = "fallback";
       let sourceSummaryIds: string[] = [];
 
-      if (resolution.kind && resolution.periodKey) {
+      const shouldUseRollupPath = resolution.kind != null && !/^(morning|afternoon|evening|\d+h)$/i.test(requestedPeriod ?? "");
+
+      if (shouldUseRollupPath && resolution.periodKey) {
         const rollup = rollupStore.getRollup(conversationId, resolution.kind, resolution.periodKey);
         if (rollup && (rollup.status === "ready" || rollup.status === "stale")) {
-          rollupContent = rollup.content;
+          rollupContent = topic ? filterRollupContentByTopic(rollup.content, topic) : rollup.content;
           tokenCount = rollup.token_count;
           status = rollup.status === "ready" ? "ready" : "stale";
           sourceSummaryIds = parseJsonStringArray(rollup.source_summary_ids);
         }
-      } else if (resolution.kind) {
+      } else if (shouldUseRollupPath && resolution.kind) {
         const rollups = rollupStore.listRollups(conversationId, resolution.kind, 200)
           .filter((rollup) => new Date(rollup.period_start) >= resolution.start && new Date(rollup.period_start) < resolution.end);
         const usableRollups = rollups.filter((rollup) => rollup.status === "ready" || rollup.status === "stale").map((rollup) => ({
@@ -453,7 +728,7 @@ export function createLcmRecentTool(input: {
         }));
         if (usableRollups.length > 0) {
           const combined = combineRollups(usableRollups);
-          rollupContent = combined.content;
+          rollupContent = topic ? filterRollupContentByTopic(combined.content, topic) : combined.content;
           tokenCount = combined.tokenCount;
           status = combined.status;
           sourceSummaryIds = combined.sourceSummaryIds;
@@ -461,10 +736,10 @@ export function createLcmRecentTool(input: {
       }
 
       if (rollupContent == null) {
-        const recentSummaries = getRecentSummaryFallback(db, conversationId, resolution.start, resolution.end);
+        const recentSummaries = getRecentSummaryFallback(db, conversationId, resolution.start, resolution.end, topic);
 
         const lines: string[] = [];
-        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(`## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`);
         lines.push(
           `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
         );
@@ -500,7 +775,11 @@ export function createLcmRecentTool(input: {
       }
 
       const lines: string[] = [];
-      lines.push(`## Recent Activity: ${resolution.label}`);
+      lines.push(
+        topic && resolution.kind === "day" && resolution.periodKey
+          ? `## Daily rollup for ${resolution.periodKey} (filtered: ${topic})`
+          : `## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`,
+      );
       lines.push(
         `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
       );
