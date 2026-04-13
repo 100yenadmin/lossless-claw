@@ -1,4 +1,8 @@
 import * as crypto from "node:crypto";
+import { extractTrackersFromRollup } from "./tracker-extractor.js";
+import { EpisodeDetector } from "./episode-detector.js";
+import { EpisodeStore } from "./store/episode-store.js";
+import { TrackerStore } from "./store/tracker-store.js";
 import { withDatabaseTransaction } from "./transaction-mutex.js";
 import type { LeafSummaryForDayRow, RollupRow, RollupStateRow, RollupStore } from "./store/rollup-store.js";
 
@@ -86,6 +90,11 @@ export class RollupBuilder {
       return result;
     }
 
+    if (state && state.pending_rebuild === 0 && !forceCurrentDay) {
+      result.skipped += daysBack;
+      return result;
+    }
+
     for (let offset = 0; offset < daysBack; offset += 1) {
       const candidateDate = shiftLocalDate(now, this.config.timezone, -offset);
       const dateKey = getLocalDateKey(candidateDate, this.config.timezone);
@@ -142,6 +151,13 @@ export class RollupBuilder {
       }
     }
 
+    try {
+      const episodeDetector = new EpisodeDetector(this.store, new EpisodeStore(this.store.db));
+      episodeDetector.syncConversationEpisodes(conversationId, now);
+    } catch (error) {
+      result.errors.push(`episode sync failed: ${formatError(error)}`);
+    }
+
     return result;
   }
 
@@ -196,7 +212,7 @@ export class RollupBuilder {
         source_summary_ids: JSON.stringify(summaries.map((summary) => summary.summaryId)),
         source_message_count: 0,
         source_token_count: totalSourceTokens,
-        status: "ready",
+        status: "building",
         coverage_start:
           summaries[0]?.earliestAt?.toISOString() ?? summaries[0]?.createdAt.toISOString() ?? null,
         coverage_end:
@@ -216,11 +232,43 @@ export class RollupBuilder {
         })),
       );
 
+      this.store.upsertRollup({
+        rollup_id: rollupId,
+        conversation_id: conversationId,
+        period_kind: PERIOD_KIND,
+        period_key: dateKey,
+        period_start: start.toISOString(),
+        period_end: end.toISOString(),
+        timezone: this.config.timezone,
+        content: draft.content,
+        token_count: draft.summaryTokenCount,
+        source_summary_ids: JSON.stringify(summaries.map((summary) => summary.summaryId)),
+        source_message_count: 0,
+        source_token_count: totalSourceTokens,
+        status: "ready",
+        coverage_start:
+          summaries[0]?.earliestAt?.toISOString() ?? summaries[0]?.createdAt.toISOString() ?? null,
+        coverage_end:
+          summaries[summaries.length - 1]?.latestAt?.toISOString()
+          ?? summaries[summaries.length - 1]?.createdAt.toISOString()
+          ?? null,
+        summarizer_model: "concatenation-v1",
+        source_fingerprint: fingerprint,
+      });
+
       this.store.upsertState(conversationId, {
         timezone: this.config.timezone,
         last_daily_build_at: builtAt.toISOString(),
         last_rollup_check_at: builtAt.toISOString(),
         pending_rebuild: 0,
+      });
+
+      extractTrackersFromRollup({
+        conversationId,
+        dateKey,
+        rollupId,
+        rollupContent: draft.content,
+        trackerStore: new TrackerStore(this.store.db),
       });
     });
 
@@ -500,7 +548,7 @@ function parseDateKey(dateKey: string): Date {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
     throw new Error(`Invalid date key: ${dateKey}`);
   }
-  return localDateTimeToUtc(dateKey, "00:00:00", "UTC");
+  return new Date(`${dateKey}T12:00:00.000Z`);
 }
 
 function shiftLocalDate(date: Date, timezone: string, dayDelta: number): Date {
