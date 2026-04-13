@@ -4868,20 +4868,31 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
   it("afterTurn records deferred compaction debt instead of compacting inline by default", async () => {
     const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluateLeafTrigger: (
+          conversationId: number,
+          leafChunkTokens?: number,
+        ) => Promise<unknown>;
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+      };
+    };
     const sessionId = "after-turn-deferred-compaction-debt";
-    vi.spyOn(engine as unknown as { evaluateIncrementalCompaction: () => Promise<unknown> }, "evaluateIncrementalCompaction").mockResolvedValue({
+    vi.spyOn(privateEngine.compaction, "evaluateLeafTrigger").mockResolvedValue({
       shouldCompact: true,
-      reason: "leaf-trigger",
-      maxPasses: 1,
-      allowCondensedPasses: false,
-      activityBand: "high",
-      leafChunkTokens: 20_000,
-      fallbackLeafChunkTokens: [20_000, 15_000, 10_000],
-      triggerLeafChunkTokens: 20_000,
-      preferredLeafChunkTokens: 20_000,
       rawTokensOutsideTail: 50_000,
       threshold: 20_000,
     } as unknown as Record<string, unknown>);
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: false,
+      reason: "below threshold",
+      currentTokens: 1_024,
+      threshold: 3_072,
+    });
     const compactLeafAsyncSpy = vi.spyOn(engine, "compactLeafAsync");
     const compactSpy = vi.spyOn(engine, "compact");
 
@@ -5213,6 +5224,110 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(maintenance?.pending).toBe(false);
     expect(maintenance?.running).toBe(false);
     expect(assembleResult.messages).toHaveLength(1);
+  });
+
+  it("assemble() waits for the session queue before consuming deferred debt", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      withSessionQueue<T>(queueKey: string, operation: () => Promise<T>): Promise<T>;
+      consumeDeferredCompactionDebt: (params: unknown) => Promise<unknown>;
+    };
+    const sessionId = "assemble-deferred-compaction-queued";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "leaf-trigger",
+      tokenBudget: 4_096,
+      currentTokenCount: 42,
+    });
+    await engine.getCompactionTelemetryStore().upsertConversationCompactionTelemetry({
+      conversationId: conversation.conversationId,
+      cacheState: "cold",
+      retention: "short",
+      lastCacheTouchAt: new Date(Date.now() - 10 * 60 * 1000),
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+    const consumeSpy = vi.spyOn(privateEngine, "consumeDeferredCompactionDebt");
+
+    let releaseQueue!: () => void;
+    const heldQueue = privateEngine.withSessionQueue(sessionId, async () => {
+      await new Promise<void>((resolve) => {
+        releaseQueue = resolve;
+      });
+    });
+
+    let assembleSettled = false;
+    const assemblePromise = engine.assemble({
+      sessionId,
+      messages: [makeMessage({ role: "user", content: "hello" })],
+      tokenBudget: 4_096,
+    }).then((result) => {
+      assembleSettled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(consumeSpy).not.toHaveBeenCalled();
+    expect(assembleSettled).toBe(false);
+
+    releaseQueue();
+    await heldQueue;
+    const assembleResult = await assemblePromise;
+
+    expect(consumeSpy).toHaveBeenCalledTimes(1);
+    expect(assembleResult.messages).toHaveLength(1);
+  });
+
+  it("maintain() re-evaluates deferred debt with the stricter current token budget", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      evaluateIncrementalCompaction: (params: unknown) => Promise<unknown>;
+    };
+    const sessionId = "maintain-deferred-compaction-current-budget";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "leaf-trigger",
+      tokenBudget: 4_096,
+      currentTokenCount: 1_024,
+    });
+
+    const evaluateIncrementalCompactionSpy = vi.spyOn(
+      privateEngine,
+      "evaluateIncrementalCompaction",
+    ).mockResolvedValue({
+      shouldCompact: false,
+      reason: "deferred compaction no longer needed",
+      maxPasses: 1,
+      allowCondensedPasses: false,
+      activityBand: "low",
+      leafChunkTokens: 20_000,
+      fallbackLeafChunkTokens: [20_000, 15_000, 10_000],
+      rawTokensOutsideTail: 0,
+      threshold: 20_000,
+      cacheState: "unknown",
+    });
+
+    await engine.maintain({
+      sessionId,
+      sessionFile: createSessionFilePath("maintain-deferred-compaction-current-budget"),
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+        tokenBudget: 2_048,
+      },
+    });
+
+    expect(evaluateIncrementalCompactionSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenBudget: 2_048,
+      }),
+    );
   });
 
   it("afterTurn persists prompt-cache telemetry for hot sessions", async () => {

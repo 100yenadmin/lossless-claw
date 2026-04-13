@@ -91,6 +91,7 @@ type IncrementalCompactionDecision = {
   maxPasses: number;
   rawTokensOutsideTail: number;
   threshold: number;
+  reason: string;
   leafChunkTokens: number;
   fallbackLeafChunkTokens: number[];
   activityBand: ActivityBand;
@@ -1956,6 +1957,7 @@ export class LcmContextEngine implements ContextEngine {
       maxPasses: params.maxPasses,
       rawTokensOutsideTail: params.rawTokensOutsideTail,
       threshold: params.threshold,
+      reason: params.reason,
       leafChunkTokens: params.preferredLeafChunkTokens,
       fallbackLeafChunkTokens: params.fallbackLeafChunkTokens,
       activityBand: params.activityBand,
@@ -2128,7 +2130,10 @@ export class LcmContextEngine implements ContextEngine {
     );
   }
 
-  /** Consume deferred proactive-compaction debt when the host explicitly allows it. */
+  /**
+   * Consume deferred proactive-compaction debt while the caller already holds
+   * the per-session queue.
+   */
   private async consumeDeferredCompactionDebt(params: {
     conversationId: number;
     sessionId: string;
@@ -2156,9 +2161,13 @@ export class LcmContextEngine implements ContextEngine {
     });
 
     try {
-      const resolvedTokenBudget = this.applyAssemblyBudgetCap(
+      const recordedTokenBudget =
         maintenance.tokenBudget && maintenance.tokenBudget > 0
           ? maintenance.tokenBudget
+          : null;
+      const resolvedTokenBudget = this.applyAssemblyBudgetCap(
+        recordedTokenBudget != null
+          ? Math.min(params.tokenBudget, recordedTokenBudget)
           : params.tokenBudget,
       );
       const resolvedCurrentTokenCount = this.normalizeObservedTokenCount(
@@ -2237,6 +2246,71 @@ export class LcmContextEngine implements ContextEngine {
         reason: error instanceof Error ? error.message : "deferred compaction failed",
       };
     }
+  }
+
+  /**
+   * Re-check and consume deferred debt for assemble() while holding the
+   * session queue so pre-assembly writes cannot race queued maintenance.
+   */
+  private async maybeConsumeDeferredCompactionDebtForAssemble(params: {
+    conversationId: number;
+    sessionId: string;
+    sessionKey?: string;
+    tokenBudget: number;
+    currentTokenCount?: number;
+  }): Promise<void> {
+    const sessionLabel = [
+      `session=${params.sessionId}`,
+      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
+    ].join(" ");
+    await this.withSessionQueue(
+      this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
+      async () => {
+        const maintenance =
+          await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
+            params.conversationId,
+          );
+        if (!maintenance?.pending && !maintenance?.running) {
+          return;
+        }
+
+        const telemetry =
+          await this.compactionTelemetryStore.getConversationCompactionTelemetry(
+            params.conversationId,
+          );
+        const promptOverflowEmergency =
+          (params.currentTokenCount ?? 0) > params.tokenBudget;
+        if (
+          promptOverflowEmergency
+          || !this.shouldDelayPromptMutatingDeferredCompaction(telemetry)
+        ) {
+          const deferredLegacyParams =
+            telemetry?.provider || telemetry?.model
+              ? {
+                  ...(telemetry.provider ? { provider: telemetry.provider } : {}),
+                  ...(telemetry.model ? { model: telemetry.model } : {}),
+                }
+              : undefined;
+          await this.consumeDeferredCompactionDebt({
+            conversationId: params.conversationId,
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            tokenBudget: params.tokenBudget,
+            currentTokenCount: params.currentTokenCount,
+            legacyParams: deferredLegacyParams,
+          });
+          return;
+        }
+
+        this.deps.log.info(
+          `[lcm] assemble: deferred compaction still cache-hot for conversation=${params.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
+        );
+      },
+      {
+        operationName: "assembleDeferredCompaction",
+        context: sessionLabel,
+      },
+    );
   }
 
   /** Run the actual compaction body without taking the per-session queue. */
@@ -4461,42 +4535,20 @@ export class LcmContextEngine implements ContextEngine {
       const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
         conversation.conversationId,
       );
-      const telemetry = await this.compactionTelemetryStore.getConversationCompactionTelemetry(
-        conversation.conversationId,
-      );
-      const promptOverflowEmergency = liveContextTokens > tokenBudget;
-      if (
-        (maintenance?.pending || maintenance?.running)
-        && (
-          promptOverflowEmergency
-          || !this.shouldDelayPromptMutatingDeferredCompaction(telemetry)
-        )
-      ) {
-        const deferredLegacyParams =
-          telemetry?.provider || telemetry?.model
-            ? {
-                ...(telemetry.provider ? { provider: telemetry.provider } : {}),
-                ...(telemetry.model ? { model: telemetry.model } : {}),
-              }
-            : undefined;
+      if (maintenance?.pending || maintenance?.running) {
         try {
-          await this.consumeDeferredCompactionDebt({
+          await this.maybeConsumeDeferredCompactionDebtForAssemble({
             conversationId: conversation.conversationId,
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
             tokenBudget,
             currentTokenCount: liveContextTokens,
-            legacyParams: deferredLegacyParams,
           });
         } catch (error) {
           this.deps.log.warn(
             `[lcm] assemble: deferred compaction execution failed for ${sessionLabel}: ${describeLogError(error)}`,
           );
         }
-      } else if (maintenance?.pending || maintenance?.running) {
-        this.deps.log.info(
-          `[lcm] assemble: deferred compaction still cache-hot for conversation=${conversation.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
-        );
       }
 
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);
