@@ -2665,26 +2665,29 @@ describe("LcmContextEngine.bootstrap", () => {
     );
   });
 
-  it("rotates LCM storage for the current session without replaying prior transcript history", async () => {
+  it("rotates the current transcript in place without replacing the conversation", async () => {
     const sessionFile = createSessionFilePath("lcm-rotate-storage");
     const sessionKey = "agent:main:main";
     const sessionId = "rotate-storage-session";
     const sm = SessionManager.open(sessionFile);
-    sm.appendMessage({
-      role: "user",
-      content: [{ type: "text", text: "old user" }],
-    } as AgentMessage);
-    sm.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "old assistant" }],
-    } as AgentMessage);
+    const originalMessages = [
+      { role: "user", content: [{ type: "text", text: "old user 1" }] },
+      { role: "assistant", content: [{ type: "text", text: "old assistant 1" }] },
+      { role: "user", content: [{ type: "text", text: "old user 2" }] },
+      { role: "assistant", content: [{ type: "text", text: "old assistant 2" }] },
+      { role: "user", content: [{ type: "text", text: "tail user" }] },
+      { role: "assistant", content: [{ type: "text", text: "tail assistant" }] },
+    ] as AgentMessage[];
+    for (const message of originalMessages) {
+      sm.appendMessage(message);
+    }
 
-    const engine = createEngine();
+    const engine = createEngineWithConfig({ freshTailCount: 2 });
 
     const first = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
     expect(first).toEqual({
       bootstrapped: true,
-      importedMessages: 2,
+      importedMessages: 6,
     });
 
     const original = await engine.getConversationStore().getConversationForSession({
@@ -2692,7 +2695,27 @@ describe("LcmContextEngine.bootstrap", () => {
       sessionKey,
     });
     expect(original).not.toBeNull();
+    const originalStoredMessages = await engine.getConversationStore().getMessages(original!.conversationId);
 
+    await engine.getSummaryStore().insertSummary({
+      summaryId: "sum_rotate_old_history",
+      conversationId: original!.conversationId,
+      kind: "leaf",
+      content: "summarized old history",
+      tokenCount: 12,
+    });
+    await engine.getSummaryStore().linkSummaryToMessages(
+      "sum_rotate_old_history",
+      originalStoredMessages.slice(0, 4).map((message) => message.messageId),
+    );
+    await engine.getSummaryStore().replaceContextRangeWithSummary({
+      conversationId: original!.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 3,
+      summaryId: "sum_rotate_old_history",
+    });
+
+    const originalSize = statSync(sessionFile).size;
     const rotate = await engine.rotateSessionStorage({
       sessionId,
       sessionKey,
@@ -2700,28 +2723,35 @@ describe("LcmContextEngine.bootstrap", () => {
     });
     expect(rotate).toEqual({
       kind: "rotated",
-      archivedConversationId: original!.conversationId,
-      activeConversationId: expect.any(Number),
-      archivedMessageCount: 2,
+      conversationId: original!.conversationId,
+      preservedTailMessageCount: 2,
       checkpointSize: statSync(sessionFile).size,
+      bytesRemoved: expect.any(Number),
     });
+    expect(rotate.kind === "rotated" ? rotate.bytesRemoved : 0).toBeGreaterThan(0);
+    expect(statSync(sessionFile).size).toBeLessThan(originalSize);
 
-    const archived = await engine.getConversationStore().getConversation(original!.conversationId);
-    const active = await engine.getConversationStore().getConversationForSession({
-      sessionId,
-      sessionKey,
-    });
-    expect(archived?.active).toBe(false);
-    expect(active).not.toBeNull();
-    expect(active?.conversationId).not.toBe(original!.conversationId);
-    expect(await engine.getConversationStore().getMessageCount(active!.conversationId)).toBe(0);
+    const active = await engine.getConversationStore().getConversationForSession({ sessionId, sessionKey });
+    expect(active?.conversationId).toBe(original!.conversationId);
+    expect(await engine.getConversationStore().getMessageCount(active!.conversationId)).toBe(6);
+    expect(await engine.getSummaryStore().getSummary("sum_rotate_old_history")).not.toBeNull();
 
     const rotatedBootstrapState = await engine
       .getSummaryStore()
-      .getConversationBootstrapState(active!.conversationId);
+      .getConversationBootstrapState(original!.conversationId);
     expect(rotatedBootstrapState?.sessionFilePath).toBe(sessionFile);
     expect(rotatedBootstrapState?.lastProcessedOffset).toBe(statSync(sessionFile).size);
     expect(rotatedBootstrapState?.lastProcessedEntryHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const rotatedManager = SessionManager.open(sessionFile);
+    const rotatedBranchMessages = rotatedManager
+      .getBranch()
+      .filter((entry) => entry.type === "message")
+      .map((entry) => entry.message);
+    expect(rotatedBranchMessages.map((message) => (message.content[0] as { text: string }).text)).toEqual([
+      "tail user",
+      "tail assistant",
+    ]);
 
     const checkpointHit = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
     expect(checkpointHit.bootstrapped).toBe(false);
@@ -2743,17 +2773,112 @@ describe("LcmContextEngine.bootstrap", () => {
       reason: "reconciled missing session messages",
     });
 
-    const archivedMessages = await engine.getConversationStore().getMessages(original!.conversationId);
-    const activeMessages = await engine.getConversationStore().getMessages(active!.conversationId);
-    expect(archivedMessages.map((message) => message.content)).toEqual(["old user", "old assistant"]);
-    expect(activeMessages.map((message) => message.content)).toEqual(["new user", "new assistant"]);
+    const storedMessages = await engine.getConversationStore().getMessages(original!.conversationId);
+    expect(storedMessages.map((message) => message.content)).toEqual([
+      "old user 1",
+      "old assistant 1",
+      "old user 2",
+      "old assistant 2",
+      "tail user",
+      "tail assistant",
+      "new user",
+      "new assistant",
+    ]);
+  });
 
-    const searchResults = await engine.getConversationStore().searchMessages({
-      query: "old user",
-      mode: "regex",
-      limit: 5,
+  it("waits for an in-flight managed transaction before backing up and rotating", async () => {
+    const sessionFile = createSessionFilePath("lcm-rotate-storage-wait");
+    const sessionManager = SessionManager.inMemory(process.cwd());
+    sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "existing" }],
+    } as AgentMessage);
+    writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify(sessionManager.getHeader()),
+        ...sessionManager.getBranch().map((entry) => JSON.stringify(entry)),
+      ].join("\n") + "\n",
+    );
+    const engine = createEngine();
+    const sessionId = "rotate-storage-wait-session";
+    const sessionKey = "agent:main:main";
+
+    const first = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
+    expect(first).toEqual({
+      bootstrapped: true,
+      importedMessages: 1,
     });
-    expect(searchResults.some((result) => result.conversationId === original!.conversationId)).toBe(true);
+
+    const current = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(current).not.toBeNull();
+
+    let releaseTransaction!: () => void;
+    let notifyTransactionStarted!: () => void;
+    const transactionStarted = new Promise<void>((resolve) => {
+      notifyTransactionStarted = resolve;
+    });
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+
+    const pendingTransaction = engine.getConversationStore().withTransaction(async () => {
+      const nextSeq = (await engine.getConversationStore().getMaxSeq(current!.conversationId)) + 1;
+      await engine.getConversationStore().createMessage({
+        conversationId: current!.conversationId,
+        seq: nextSeq,
+        role: "assistant",
+        content: "queued rotate message",
+        tokenCount: 3,
+      });
+      notifyTransactionStarted();
+      await transactionGate;
+    });
+
+    await transactionStarted;
+
+    let rotateResolved = false;
+    const rotatePromise = engine
+      .rotateSessionStorageWithBackup({
+        sessionId,
+        sessionKey,
+        sessionFile,
+        lockTimeoutMs: 1_000,
+      })
+      .then((result) => {
+        rotateResolved = true;
+        return result;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(rotateResolved).toBe(false);
+
+    releaseTransaction();
+    await pendingTransaction;
+
+    const rotate = await rotatePromise;
+    expect(rotate).toMatchObject({
+      kind: "rotated",
+      currentConversationId: current!.conversationId,
+      currentMessageCount: 2,
+      preservedTailMessageCount: 1,
+    });
+    if (rotate.kind !== "rotated") {
+      throw new Error(`Expected rotate to succeed, received ${rotate.kind}`);
+    }
+
+    const backupDb = createLcmDatabaseConnection(rotate.backupPath);
+    try {
+      const backedUpMessageCount = backupDb
+        .prepare(`SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?`)
+        .get(current!.conversationId) as { count: number };
+      expect(backedUpMessageCount.count).toBe(2);
+    } finally {
+      closeLcmConnection(backupDb);
+    }
   });
 
   it("reports rotate as unavailable when the session transcript cannot be read", async () => {
@@ -2780,7 +2905,7 @@ describe("LcmContextEngine.bootstrap", () => {
     });
 
     expect(result.kind).toBe("unavailable");
-    expect(result.reason).toContain("could not read the current session transcript");
+    expect(result.reason).toContain("could not rotate the current session transcript");
   });
 
   it("reconciles missing tail messages when JSONL advanced past LCM", async () => {
