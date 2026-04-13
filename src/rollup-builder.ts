@@ -1,4 +1,8 @@
 import * as crypto from "node:crypto";
+import { extractTrackersFromRollup } from "./tracker-extractor.js";
+import { EpisodeDetector } from "./episode-detector.js";
+import { EpisodeStore } from "./store/episode-store.js";
+import { TrackerStore } from "./store/tracker-store.js";
 import { withDatabaseTransaction } from "./transaction-mutex.js";
 import type { LeafSummaryForDayRow, RollupRow, RollupStateRow, RollupStore } from "./store/rollup-store.js";
 
@@ -147,6 +151,13 @@ export class RollupBuilder {
       }
     }
 
+    try {
+      const episodeDetector = new EpisodeDetector(this.store, new EpisodeStore(this.store.db));
+      episodeDetector.syncConversationEpisodes(conversationId, now);
+    } catch (error) {
+      result.errors.push(`episode sync failed: ${formatError(error)}`);
+    }
+
     return result;
   }
 
@@ -251,6 +262,14 @@ export class RollupBuilder {
         last_rollup_check_at: builtAt.toISOString(),
         pending_rebuild: 0,
       });
+
+      extractTrackersFromRollup({
+        conversationId,
+        dateKey,
+        rollupId,
+        rollupContent: draft.content,
+        trackerStore: new TrackerStore(this.store.db),
+      });
     });
 
     return true;
@@ -354,7 +373,7 @@ function renderDailyRollup(params: {
   dateKey: string;
   entries: TimelineEntry[];
   omittedEntries: number;
-  keyItems: { decisions: string[]; completed: string[]; blockers: string[] };
+  keyItems: { decisions: string[]; completed: string[]; blockers: string[]; openItems: string[] };
   stats: { leafSummaries: number; timeSpan: string; totalSourceTokens: number };
 }): string {
   const timelineLines: string[] = [];
@@ -379,6 +398,7 @@ function renderDailyRollup(params: {
     `- Decisions: ${formatList(params.keyItems.decisions)}`,
     `- Completed: ${formatList(params.keyItems.completed)}`,
     `- Blockers: ${formatList(params.keyItems.blockers)}`,
+    `- Open Items: ${formatList(params.keyItems.openItems)}`,
     "",
     "## Statistics",
     `- Leaf summaries: ${params.stats.leafSummaries}`,
@@ -416,11 +436,25 @@ function extractKeyItems(summaries: SummaryRecord[]): {
   decisions: string[];
   completed: string[];
   blockers: string[];
+  openItems: string[];
 } {
   const buckets = {
-    decisions: collectMatchingLines(summaries, /\b(decided|decision|chose|agreed)\b/i),
-    completed: collectMatchingLines(summaries, /\b(completed|done|finished|shipped|merged|deployed)\b/i),
-    blockers: collectMatchingLines(summaries, /\b(blocked|failed|error|issue|broken)\b/i),
+    decisions: collectMatchingLines(
+      summaries,
+      /\b(decided|decision|agreed|chose|picked|selected|committed to|settled on|approved|confirmed|ruled out|rejected|went with)\b/i,
+    ),
+    completed: collectMatchingLines(
+      summaries,
+      /\b(completed|done|finished|shipped|merged|deployed|landed|released|published|closed|resolved|fixed|delivered|pushed|cut|went live|launched)\b/i,
+    ),
+    blockers: collectMatchingLines(
+      summaries,
+      /\b(blocked|blocker|failed|error|issue|broken|stuck|waiting on|depends on|can't proceed|needs|pending|stalled|held up|unresolved|failing)\b/i,
+    ),
+    openItems: collectMatchingLines(
+      summaries,
+      /\b(need to decide|todo|open question|tbd|revisit|follow up|come back to|unresolved|still need)\b/i,
+    ),
   };
   return buckets;
 }

@@ -2,17 +2,26 @@ import { Type } from "@sinclair/typebox";
 import type { DatabaseSync } from "node:sqlite";
 import { formatTimestamp } from "../compaction.js";
 import type { LcmContextEngine } from "../engine.js";
+import { EpisodeStore } from "../store/episode-store.js";
 import { RollupStore } from "../store/rollup-store.js";
+import { TrackerStore, type TrackerKind } from "../store/tracker-store.js";
 import type { LcmDependencies } from "../types.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
 import { parseIsoTimestampParam, resolveLcmConversationScope } from "./lcm-conversation-scope.js";
 
 const LcmRecentSchema = Type.Object({
-  period: Type.String({
-    description:
-      'Time period: "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD"',
-  }),
+  period: Type.Optional(
+    Type.String({
+      description:
+        'Time period: "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "open_items", "blockers", "episodes", "episode:keyword", "Nh" (up to 72h, e.g. "6h"), or "date:YYYY-MM-DD"',
+    }),
+  ),
+  topic: Type.Optional(
+    Type.String({
+      description: "Filter results to a specific topic or keyword",
+    }),
+  ),
   conversationId: Type.Optional(
     Type.Number({
       description: "Conversation ID. Defaults to current session.",
@@ -69,6 +78,9 @@ type PeriodResolution = {
   label: string;
   kind?: RollupPeriodKind;
   periodKey?: string;
+  trackerKind?: TrackerKind;
+  episodeKeyword?: string;
+  mode?: "rollup" | "episodes" | "episode";
   start: Date;
   end: Date;
 };
@@ -174,6 +186,29 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
   const now = new Date();
   const today = getZonedDayString(now, timezone);
 
+  if (normalized === "episodes") {
+    return {
+      label: "episodes",
+      mode: "episodes",
+      start: now,
+      end: now,
+    };
+  }
+
+  if (normalized.startsWith("episode:")) {
+    const keyword = period.trim().slice("episode:".length).trim();
+    if (!keyword) {
+      throw new Error('period "episode:keyword" requires a non-empty keyword.');
+    }
+    return {
+      label: `episode: ${keyword}`,
+      mode: "episode",
+      episodeKeyword: keyword,
+      start: now,
+      end: now,
+    };
+  }
+
   if (normalized === "today") {
     const start = getUtcDateForZonedMidnight(today, timezone);
     const end = getUtcDateForZonedMidnight(addDays(today, 1), timezone);
@@ -217,6 +252,26 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
     };
   }
 
+  if (normalized === "open_items") {
+    const weekStartDay = startOfWeekDayString(today);
+    return {
+      label: "open items this week",
+      trackerKind: "open_item",
+      start: getUtcDateForZonedMidnight(weekStartDay, timezone),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
+  if (normalized === "blockers") {
+    const weekStartDay = startOfWeekDayString(today);
+    return {
+      label: "blockers this week",
+      trackerKind: "blocker",
+      start: getUtcDateForZonedMidnight(weekStartDay, timezone),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
   if (normalized === "week") {
     const weekStartDay = startOfWeekDayString(today);
     const start = getUtcDateForZonedMidnight(weekStartDay, timezone);
@@ -244,8 +299,18 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
   }
 
   throw new Error(
-    'period must be one of "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD".',
+    'period must be one of "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "open_items", "blockers", "episodes", "episode:keyword", "Nh" (up to 72h), or "date:YYYY-MM-DD".',
   );
+}
+
+function formatDayRange(firstDay: string, lastDay: string): string {
+  return firstDay === lastDay ? firstDay : `${firstDay} → ${lastDay}`;
+}
+
+function formatDaysOpen(sourceDay: string): number {
+  const started = new Date(`${sourceDay}T00:00:00.000Z`);
+  const diffMs = Date.now() - started.getTime();
+  return Math.max(0, Math.floor(diffMs / 86_400_000));
 }
 
 function formatSourcesLine(summaryIds: string[], includeSources: boolean): string {
@@ -411,7 +476,115 @@ export function createLcmRecentTool(input: {
 
       const db = getLcmDatabase(lcm);
       const rollupStore = input.rollupStore ?? new RollupStore(db);
+      const trackerStore = new TrackerStore(db);
+      const episodeStore = new EpisodeStore(db);
       const conversationId = conversationScope.conversationId as number;
+
+      if (resolution.mode === "episodes") {
+        const episodes = episodeStore.getActiveEpisodes(conversationId);
+        const lines: string[] = [];
+        lines.push("## Active Episodes");
+        lines.push(`**Conversation:** ${conversationId}`);
+        lines.push(`**Count:** ${episodes.length}`);
+        lines.push("");
+        if (episodes.length === 0) {
+          lines.push("No active or stale episodes found.");
+        } else {
+          for (const episode of episodes) {
+            const keywords = parseJsonStringArray(episode.keywords);
+            lines.push(`### ${episode.title}`);
+            lines.push(`- Status: ${episode.status}`);
+            lines.push(`- Duration: ${episode.day_count} day(s)`);
+            lines.push(`- Days: ${formatDayRange(episode.first_day, episode.last_day)}`);
+            lines.push(`- Last activity: ${episode.last_day}`);
+            lines.push(`- Keywords: ${keywords.length > 0 ? keywords.join(", ") : "None"}`);
+            lines.push("");
+          }
+        }
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            episodeCount: episodes.length,
+          },
+        };
+      }
+
+      if (resolution.mode === "episode") {
+        const episode = episodeStore.searchEpisodes(conversationId, resolution.episodeKeyword ?? "")[0] ?? null;
+        if (!episode) {
+          return jsonResult({ error: `No episode matched keyword \"${resolution.episodeKeyword}\".` });
+        }
+
+        const rollups = parseJsonStringArray(episode.rollup_ids)
+          .map((rollupId) => rollupStore.getRollupById(rollupId))
+          .filter((rollup): rollup is NonNullable<typeof rollup> => Boolean(rollup))
+          .sort((left, right) => left.period_key.localeCompare(right.period_key));
+        const keywords = parseJsonStringArray(episode.keywords);
+        const lines: string[] = [];
+        lines.push(`## Episode: ${episode.title}`);
+        lines.push(`**Status:** ${episode.status}`);
+        lines.push(`**Duration:** ${episode.day_count} day(s)`);
+        lines.push(`**Days:** ${formatDayRange(episode.first_day, episode.last_day)}`);
+        lines.push(`**Keywords:** ${keywords.length > 0 ? keywords.join(", ") : "None"}`);
+        lines.push("");
+        if (rollups.length === 0) {
+          lines.push("No rollups were attached to this episode.");
+        } else {
+          lines.push("## Day-by-day rollups");
+          lines.push("");
+          for (const rollup of rollups) {
+            lines.push(`### ${rollup.period_key}`);
+            lines.push(rollup.content.trim());
+            lines.push("");
+          }
+        }
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            episodeId: episode.episode_id,
+            rollupCount: rollups.length,
+          },
+        };
+      }
+
+      if (resolution.trackerKind) {
+        const startDay = getZonedDayString(resolution.start, timezone);
+        const openTrackers = trackerStore
+          .getOpenTrackers(conversationId, resolution.trackerKind)
+          .filter((tracker) => tracker.source_day >= startDay);
+
+        const lines: string[] = [];
+        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(
+          `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
+        );
+        lines.push("**Status:** ready");
+        lines.push(`**Open items:** ${openTrackers.length}`);
+        lines.push("");
+        if (openTrackers.length === 0) {
+          lines.push("No open tracked items found for this period.");
+        } else {
+          for (const tracker of openTrackers) {
+            lines.push(
+              `- [${tracker.kind}] opened ${tracker.source_day} (${formatDaysOpen(tracker.source_day)}d open): ${tracker.content}`,
+            );
+          }
+        }
+        lines.push("");
+        lines.push("---");
+        lines.push("*Sources: tracker state*");
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            status: "ready",
+            trackerKind: resolution.trackerKind,
+            totalOpen: openTrackers.length,
+          },
+        };
+      }
 
       let rollupContent: string | null = null;
       let tokenCount = 0;
