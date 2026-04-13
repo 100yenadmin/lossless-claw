@@ -8,7 +8,10 @@ import type { LcmSummarizeFn } from "../summarize.js";
 import type { LcmDependencies } from "../types.js";
 import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "openclaw/plugin-sdk";
 import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
-import { createLcmDatabaseBackup } from "./lcm-db-backup.js";
+import {
+  createLcmDatabaseBackup,
+  createLcmDatabaseBackupFromSecondaryConnection,
+} from "./lcm-db-backup.js";
 import { describeLogError } from "../lcm-log.js";
 import {
   applyDoctorCleaners,
@@ -997,7 +1000,7 @@ async function buildRotateText(params: {
 
   let backupPath: string | null;
   try {
-    backupPath = createLcmDatabaseBackup(params.db, {
+    backupPath = await createLcmDatabaseBackupFromSecondaryConnection({
       databasePath: params.config.databasePath,
       label: "rotate",
       replaceLatest: true,

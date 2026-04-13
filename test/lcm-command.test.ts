@@ -9,6 +9,7 @@ import { resolveLcmConfig } from "../src/db/config.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
+import * as lcmDbBackup from "../src/plugin/lcm-db-backup.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
 import type { LcmDependencies } from "../src/types.js";
 
@@ -1214,7 +1215,7 @@ describe("lcm command", () => {
     });
   });
 
-  it("reports rotate failure when replacing the latest rotate backup throws", async () => {
+  it("rotates successfully when the live db connection already has an open transaction", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-backup-fail-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
     tempDirs.add(transcriptPath);
@@ -1237,9 +1238,65 @@ describe("lcm command", () => {
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
-    vi.spyOn(fixture.db, "exec").mockImplementation(() => {
-      throw new Error("SQLITE_BUSY");
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "rotate-backup-failure-session",
+      sessionKey: "agent:main:main",
     });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "first message",
+        tokenCount: 2,
+      },
+    ]);
+
+    fixture.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = await fixture.command.handler(
+        createCommandContext("rotate", {
+          sessionId: "rotate-backup-failure-session",
+          sessionKey: "agent:main:main",
+        }),
+      );
+
+      expect(result.text).toContain("🪓 Lossless Claw Rotate");
+      expect(result.text).toContain("status: replaced latest");
+      expect(result.text).toContain("status: rotated");
+      expect(rotateSessionStorage).toHaveBeenCalled();
+    } finally {
+      fixture.db.exec("ROLLBACK");
+    }
+  });
+
+  it("reports rotate failure when the secondary-connection backup throws", async () => {
+    const transcriptPath = join(tmpdir(), `lossless-claw-rotate-backup-fail-${Date.now()}.jsonl`);
+    writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
+    tempDirs.add(transcriptPath);
+
+    const rotateSessionStorage = vi.fn(async () => ({
+      kind: "rotated" as const,
+      archivedConversationId: 7,
+      activeConversationId: 8,
+      archivedMessageCount: 42,
+      checkpointSize: 1234,
+    }));
+    const deps = {
+      resolveSessionTranscriptFile: vi.fn(async () => transcriptPath),
+    } as unknown as LcmDependencies;
+    const fixture = createCommandFixture({
+      deps,
+      getLcm: async () => ({
+        rotateSessionStorage,
+      }),
+    });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+    vi.spyOn(lcmDbBackup, "createLcmDatabaseBackupFromSecondaryConnection").mockRejectedValue(
+      new Error("SQLITE_BUSY"),
+    );
 
     const currentConversation = await fixture.conversationStore.createConversation({
       sessionId: "rotate-backup-failure-session",
