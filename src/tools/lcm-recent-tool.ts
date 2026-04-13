@@ -9,10 +9,17 @@ import { jsonResult } from "./common.js";
 import { parseIsoTimestampParam, resolveLcmConversationScope } from "./lcm-conversation-scope.js";
 
 const LcmRecentSchema = Type.Object({
-  period: Type.String({
-    description:
-      'Time period: "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD"',
-  }),
+  period: Type.Optional(
+    Type.String({
+      description:
+        'Time period: "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "Nh" (up to 72h, e.g. "6h"), or "date:YYYY-MM-DD"',
+    }),
+  ),
+  topic: Type.Optional(
+    Type.String({
+      description: "Filter results to a specific topic or keyword",
+    }),
+  ),
   conversationId: Type.Optional(
     Type.Number({
       description: "Conversation ID. Defaults to current session.",
@@ -169,6 +176,22 @@ function startOfMonthDayString(dayString: string): string {
   return `${year}-${month}-01`;
 }
 
+function getUtcDateForZonedTime(
+  dayString: string,
+  timezone: string,
+  hour: number,
+  minute = 0,
+  second = 0,
+  millisecond = 0,
+): Date {
+  const midnight = getUtcDateForZonedMidnight(dayString, timezone);
+  const localMidnight = new Date(midnight.toLocaleString("en-US", { timeZone: timezone }));
+  const targetLocal = new Date(localMidnight);
+  targetLocal.setHours(hour, minute, second, millisecond);
+  const offsetMs = localMidnight.getTime() - midnight.getTime();
+  return new Date(targetLocal.getTime() - offsetMs);
+}
+
 function resolvePeriod(period: string, timezone: string): PeriodResolution {
   const normalized = period.trim().toLowerCase();
   const now = new Date();
@@ -185,6 +208,46 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
     const start = getUtcDateForZonedMidnight(day, timezone);
     const end = getUtcDateForZonedMidnight(today, timezone);
     return { label: "yesterday", kind: "day", periodKey: day, start, end };
+  }
+
+  if (normalized === "morning") {
+    return {
+      label: "this morning",
+      start: getUtcDateForZonedTime(today, timezone, 6),
+      end: getUtcDateForZonedTime(today, timezone, 12),
+    };
+  }
+
+  if (normalized === "afternoon") {
+    return {
+      label: "this afternoon",
+      start: getUtcDateForZonedTime(today, timezone, 12),
+      end: getUtcDateForZonedTime(today, timezone, 18),
+    };
+  }
+
+  if (normalized === "evening") {
+    return {
+      label: "this evening",
+      start: getUtcDateForZonedTime(today, timezone, 18),
+      end: getUtcDateForZonedMidnight(addDays(today, 1), timezone),
+    };
+  }
+
+  const hoursMatch = normalized.match(/^(\d+)h$/);
+  if (hoursMatch) {
+    const hours = Number(hoursMatch[1]);
+    if (!Number.isInteger(hours) || hours < 1) {
+      throw new Error('period hours must be a positive integer in the form "Nh".');
+    }
+    if (hours > 72) {
+      throw new Error('period hours must be 72h or less. Use day-based syntax like "7d" for longer ranges.');
+    }
+    return {
+      label: `last ${hours} hour${hours === 1 ? "" : "s"}`,
+      start: new Date(now.getTime() - hours * 60 * 60 * 1000),
+      end: now,
+    };
   }
 
   if (normalized.startsWith("date:")) {
@@ -244,7 +307,7 @@ function resolvePeriod(period: string, timezone: string): PeriodResolution {
   }
 
   throw new Error(
-    'period must be one of "today", "yesterday", "7d", "week", "month", "30d", or "date:YYYY-MM-DD".',
+    'period must be one of "today", "yesterday", "morning", "afternoon", "evening", "7d", "week", "month", "30d", "Nh" (up to 72h), or "date:YYYY-MM-DD".',
   );
 }
 
@@ -270,12 +333,52 @@ function combineRollups(rollups: RollupRecord[]): {
   return { content, tokenCount, status, sourceSummaryIds };
 }
 
+function filterRollupContentByTopic(content: string, topic: string): string {
+  const normalizedTopic = topic.trim().toLowerCase();
+  if (!normalizedTopic) {
+    return content;
+  }
+
+  const lines = content.split(/\r?\n/);
+  const includeIndexes = new Set<number>();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.toLowerCase().includes(normalizedTopic)) {
+      includeIndexes.add(index - 1);
+      includeIndexes.add(index);
+      includeIndexes.add(index + 1);
+    }
+  }
+
+  const validIndexes = [...includeIndexes]
+    .filter((index) => index >= 0 && index < lines.length)
+    .sort((a, b) => a - b);
+
+  if (validIndexes.length === 0) {
+    return "No matching topic lines found in this rollup.";
+  }
+
+  const filtered: string[] = [];
+  let previousIndex: number | null = null;
+  for (const index of validIndexes) {
+    if (previousIndex !== null && index > previousIndex + 1) {
+      filtered.push("...");
+    }
+    filtered.push(lines[index] ?? "");
+    previousIndex = index;
+  }
+
+  return filtered.join("\n").trim();
+}
+
 function getRecentSummaryFallback(
   db: DatabaseSync,
   conversationId: number,
   start: Date,
   end: Date,
+  topic?: string,
 ): RecentSummaryFallbackRow[] {
+  const hasTopic = typeof topic === "string" && topic.trim().length > 0;
   return db
     .prepare(
       `SELECT
@@ -290,10 +393,15 @@ function getRecentSummaryFallback(
          AND kind = 'leaf'
          AND coalesce(latest_at, earliest_at, created_at) >= ?
          AND coalesce(latest_at, earliest_at, created_at) < ?
+         ${hasTopic ? "AND lower(content) LIKE '%' || ? || '%'" : ""}
        ORDER BY coalesce(latest_at, earliest_at, created_at) DESC
        LIMIT 20`,
     )
-    .all(conversationId, start.toISOString(), end.toISOString()) as unknown as RecentSummaryFallbackRow[];
+    .all(
+      ...(hasTopic
+        ? [conversationId, start.toISOString(), end.toISOString(), topic!.trim().toLowerCase()]
+        : [conversationId, start.toISOString(), end.toISOString()]),
+    ) as unknown as RecentSummaryFallbackRow[];
 }
 
 export function createLcmRecentTool(input: {
@@ -320,6 +428,7 @@ export function createLcmRecentTool(input: {
       const includeSources = p.includeSources === true;
       const timezone = lcm.timezone;
       const retrieval = lcm.getRetrieval();
+      const topic = typeof p.topic === "string" ? p.topic.trim() : "";
       const conversationScope = await resolveLcmConversationScope({
         lcm,
         deps: input.deps,
@@ -335,9 +444,11 @@ export function createLcmRecentTool(input: {
         });
       }
 
+      const requestedPeriod = typeof p.period === "string" && p.period.trim().length > 0 ? p.period.trim() : undefined;
+
       let resolution: PeriodResolution;
       try {
-        resolution = resolvePeriod(String(p.period ?? ""), timezone);
+        resolution = resolvePeriod(requestedPeriod ?? (topic ? "7d" : ""), timezone);
       } catch (error) {
         return jsonResult({
           error: error instanceof Error ? error.message : "Invalid period.",
@@ -353,7 +464,7 @@ export function createLcmRecentTool(input: {
 
       if (conversationScope.allConversations) {
         const fallback = await retrieval.grep({
-          query: "",
+          query: topic || "",
           mode: "full_text",
           scope: "both",
           conversationId: undefined,
@@ -364,7 +475,7 @@ export function createLcmRecentTool(input: {
         });
 
         const lines: string[] = [];
-        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(`## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`);
         lines.push(
           `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
         );
@@ -418,15 +529,17 @@ export function createLcmRecentTool(input: {
       let status: "ready" | "stale" | "fallback" = "fallback";
       let sourceSummaryIds: string[] = [];
 
-      if (resolution.kind && resolution.periodKey) {
+      const shouldUseRollupPath = resolution.kind != null;
+
+      if (shouldUseRollupPath && resolution.periodKey) {
         const rollup = rollupStore.getRollup(conversationId, resolution.kind, resolution.periodKey);
         if (rollup && (rollup.status === "ready" || rollup.status === "stale")) {
-          rollupContent = rollup.content;
+          rollupContent = topic ? filterRollupContentByTopic(rollup.content, topic) : rollup.content;
           tokenCount = rollup.token_count;
           status = rollup.status === "ready" ? "ready" : "stale";
           sourceSummaryIds = parseJsonStringArray(rollup.source_summary_ids);
         }
-      } else if (resolution.kind) {
+      } else if (shouldUseRollupPath && resolution.kind) {
         const rollups = rollupStore.listRollups(conversationId, resolution.kind, 200)
           .filter((rollup) => new Date(rollup.period_start) >= resolution.start && new Date(rollup.period_start) < resolution.end);
         const usableRollups = rollups.filter((rollup) => rollup.status === "ready" || rollup.status === "stale").map((rollup) => ({
@@ -453,7 +566,7 @@ export function createLcmRecentTool(input: {
         }));
         if (usableRollups.length > 0) {
           const combined = combineRollups(usableRollups);
-          rollupContent = combined.content;
+          rollupContent = topic ? filterRollupContentByTopic(combined.content, topic) : combined.content;
           tokenCount = combined.tokenCount;
           status = combined.status;
           sourceSummaryIds = combined.sourceSummaryIds;
@@ -461,10 +574,10 @@ export function createLcmRecentTool(input: {
       }
 
       if (rollupContent == null) {
-        const recentSummaries = getRecentSummaryFallback(db, conversationId, resolution.start, resolution.end);
+        const recentSummaries = getRecentSummaryFallback(db, conversationId, resolution.start, resolution.end, topic);
 
         const lines: string[] = [];
-        lines.push(`## Recent Activity: ${resolution.label}`);
+        lines.push(`## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`);
         lines.push(
           `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
         );
@@ -500,7 +613,11 @@ export function createLcmRecentTool(input: {
       }
 
       const lines: string[] = [];
-      lines.push(`## Recent Activity: ${resolution.label}`);
+      lines.push(
+        topic && resolution.kind === "day" && resolution.periodKey
+          ? `## Daily rollup for ${resolution.periodKey} (filtered: ${topic})`
+          : `## Recent Activity: ${resolution.label}${topic ? ` (filtered: ${topic})` : ""}`,
+      );
       lines.push(
         `**Period:** ${formatDisplayTime(resolution.start, timezone)} — ${formatDisplayTime(resolution.end, timezone)}`,
       );
