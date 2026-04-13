@@ -568,21 +568,18 @@ function backfillToolCallColumns(db: DatabaseSync): void {
 }
 
 function getExistingTableNames(db: DatabaseSync, names: string[]): Set<string> {
-  const existing = new Set<string>();
-  for (const name of names) {
-    const row = db
-      .prepare(
-        `SELECT name
-         FROM sqlite_master
-         WHERE type = 'table' AND name = ?
-         LIMIT 1`,
-      )
-      .get(name) as TableNameRow | undefined;
-    if (typeof row?.name === "string" && row.name.length > 0) {
-      existing.add(row.name);
-    }
+  if (names.length === 0) {
+    return new Set();
   }
-  return existing;
+  const placeholders = names.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
+    .all(...names) as TableNameRow[];
+  return new Set(
+    rows
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string" && name.length > 0),
+  );
 }
 
 function getFtsShadowTableNames(tableName: string): string[] {
@@ -940,33 +937,25 @@ export function runLcmMigrations(
       CREATE INDEX IF NOT EXISTS summaries_leaf_temporal_idx
         ON summaries (conversation_id, kind) WHERE kind = 'leaf';
     `);
-
-    const conversationTables = getExistingTableNames(db, ["conversations", "lcm_rollups", "lcm_rollup_state"]);
-    if (!conversationTables.has("conversations")) {
-      return;
-    }
-
-    const rollupColumns = db.prepare(`PRAGMA foreign_key_list(lcm_rollups)`).all() as Array<{ table?: string; from?: string }>;
-    const hasRollupConversationFk = rollupColumns.some(
-      (row) => row.table === "conversations" && row.from === "conversation_id",
-    );
-    if (!hasRollupConversationFk) {
-      db.exec(
-        `CREATE INDEX IF NOT EXISTS lcm_rollups_conversation_id_fk_hint_idx
-          ON lcm_rollups (conversation_id)`,
+  });
+  runMigrationStep("ensureRollupTrackerTables", log, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lcm_rollup_trackers (
+        tracker_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('blocker', 'open_item', 'decision', 'question')),
+        content TEXT NOT NULL,
+        source_rollup_id TEXT REFERENCES lcm_rollups(rollup_id),
+        source_day TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'stale')),
+        resolved_day TEXT,
+        resolved_rollup_id TEXT REFERENCES lcm_rollups(rollup_id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-    }
-
-    const stateColumns = db.prepare(`PRAGMA foreign_key_list(lcm_rollup_state)`).all() as Array<{ table?: string; from?: string }>;
-    const hasStateConversationFk = stateColumns.some(
-      (row) => row.table === "conversations" && row.from === "conversation_id",
-    );
-    if (!hasStateConversationFk) {
-      db.exec(
-        `CREATE INDEX IF NOT EXISTS lcm_rollup_state_conversation_id_fk_hint_idx
-          ON lcm_rollup_state (conversation_id)`,
-      );
-    }
+      CREATE INDEX IF NOT EXISTS lcm_trackers_conv_status_idx
+        ON lcm_rollup_trackers (conversation_id, status, kind);
+    `);
   });
   runMigrationStep("ensureRollupViews", log, () => {
     db.exec(`
@@ -976,6 +965,27 @@ export function runLcmMigrations(
         SELECT * FROM lcm_rollups WHERE period_kind = 'week';
       CREATE VIEW IF NOT EXISTS monthly_rollups AS
         SELECT * FROM lcm_rollups WHERE period_kind = 'month';
+    `);
+  });
+  runMigrationStep("ensureEpisodeTables", log, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lcm_episodes (
+        episode_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'stale')),
+        first_day TEXT NOT NULL,
+        last_day TEXT NOT NULL,
+        keywords TEXT NOT NULL DEFAULT '[]',
+        rollup_ids TEXT NOT NULL DEFAULT '[]',
+        day_count INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS lcm_episodes_conv_status_idx
+        ON lcm_episodes (conversation_id, status);
+      CREATE INDEX IF NOT EXISTS lcm_episodes_conv_days_idx
+        ON lcm_episodes (conversation_id, first_day, last_day);
     `);
   });
 
