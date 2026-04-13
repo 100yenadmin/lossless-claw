@@ -6,7 +6,7 @@ import { RollupStore } from "../store/rollup-store.js";
 import type { LcmDependencies } from "../types.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
-import { parseIsoTimestampParam, resolveLcmConversationScope } from "./lcm-conversation-scope.js";
+import { resolveLcmConversationScope } from "./lcm-conversation-scope.js";
 
 const LcmRecentSchema = Type.Object({
   period: Type.String({
@@ -344,16 +344,9 @@ export function createLcmRecentTool(input: {
         });
       }
 
-      try {
-        parseIsoTimestampParam(p, "since");
-        parseIsoTimestampParam(p, "before");
-      } catch {
-        // Intentional no-op, imported helper kept aligned with surrounding tool conventions.
-      }
-
       if (conversationScope.allConversations) {
         const fallback = await retrieval.grep({
-          query: "",
+          query: "*",
           mode: "full_text",
           scope: "both",
           conversationId: undefined,

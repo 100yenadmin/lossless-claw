@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { withDatabaseTransaction } from "../transaction-mutex.js";
 
 export interface RollupRow {
   rollup_id: string;
@@ -87,7 +86,6 @@ export class RollupStore {
           error_text
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), NULL, NULL)
         ON CONFLICT(conversation_id, period_kind, period_key) DO UPDATE SET
-          rollup_id = excluded.rollup_id,
           period_start = excluded.period_start,
           period_end = excluded.period_end,
           timezone = excluded.timezone,
@@ -272,22 +270,20 @@ export class RollupStore {
   }
 
   replaceRollupSources(rollupId: string, sources: RollupSourceInput[]): void {
-    void withDatabaseTransaction(this.db, "BEGIN", () => {
-      this.db.prepare(`DELETE FROM lcm_rollup_sources WHERE rollup_id = ?`).run(rollupId);
+    this.db.prepare(`DELETE FROM lcm_rollup_sources WHERE rollup_id = ?`).run(rollupId);
 
-      if (sources.length === 0) {
-        return;
-      }
+    if (sources.length === 0) {
+      return;
+    }
 
-      const insert = this.db.prepare(
-        `INSERT INTO lcm_rollup_sources (rollup_id, source_type, source_id, ordinal)
-         VALUES (?, ?, ?, ?)`,
-      );
+    const insert = this.db.prepare(
+      `INSERT INTO lcm_rollup_sources (rollup_id, source_type, source_id, ordinal)
+       VALUES (?, ?, ?, ?)`,
+    );
 
-      for (const source of sources) {
-        insert.run(rollupId, source.type, source.id, source.ordinal);
-      }
-    });
+    for (const source of sources) {
+      insert.run(rollupId, source.type, source.id, source.ordinal);
+    }
   }
 
   getRollupSources(rollupId: string): Array<{ source_type: string; source_id: string; ordinal: number }> {
@@ -332,60 +328,42 @@ export class RollupStore {
       )
       .run(conversationId, updates.timezone ?? "UTC");
 
+    const assignments: string[] = [];
+    const values: Array<number | string | null> = [];
+
     if (updates.timezone !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE lcm_rollup_state
-           SET timezone = ?,
-               updated_at = datetime('now')
-           WHERE conversation_id = ?`,
-        )
-        .run(updates.timezone, conversationId);
+      assignments.push("timezone = ?");
+      values.push(updates.timezone);
     }
-
     if (updates.last_message_at !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE lcm_rollup_state
-           SET last_message_at = ?,
-               updated_at = datetime('now')
-           WHERE conversation_id = ?`,
-        )
-        .run(updates.last_message_at, conversationId);
+      assignments.push("last_message_at = ?");
+      values.push(updates.last_message_at);
     }
-
     if (updates.last_rollup_check_at !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE lcm_rollup_state
-           SET last_rollup_check_at = ?,
-               updated_at = datetime('now')
-           WHERE conversation_id = ?`,
-        )
-        .run(updates.last_rollup_check_at, conversationId);
+      assignments.push("last_rollup_check_at = ?");
+      values.push(updates.last_rollup_check_at);
     }
-
     if (updates.last_daily_build_at !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE lcm_rollup_state
-           SET last_daily_build_at = ?,
-               updated_at = datetime('now')
-           WHERE conversation_id = ?`,
-        )
-        .run(updates.last_daily_build_at, conversationId);
+      assignments.push("last_daily_build_at = ?");
+      values.push(updates.last_daily_build_at);
+    }
+    if (updates.pending_rebuild !== undefined) {
+      assignments.push("pending_rebuild = ?");
+      values.push(updates.pending_rebuild);
     }
 
-    if (updates.pending_rebuild !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE lcm_rollup_state
-           SET pending_rebuild = ?,
-               updated_at = datetime('now')
-           WHERE conversation_id = ?`,
-        )
-        .run(updates.pending_rebuild, conversationId);
+    if (assignments.length === 0) {
+      return;
     }
+
+    this.db
+      .prepare(
+        `UPDATE lcm_rollup_state
+         SET ${assignments.join(", ")},
+             updated_at = datetime('now')
+         WHERE conversation_id = ?`,
+      )
+      .run(...values, conversationId);
   }
 
   getLeafSummariesForDay(

@@ -86,11 +86,6 @@ export class RollupBuilder {
       return result;
     }
 
-    if (state && state.pending_rebuild === 0 && !forceCurrentDay) {
-      result.skipped += daysBack;
-      return result;
-    }
-
     for (let offset = 0; offset < daysBack; offset += 1) {
       const candidateDate = shiftLocalDate(now, this.config.timezone, -offset);
       const dateKey = getLocalDateKey(candidateDate, this.config.timezone);
@@ -201,7 +196,7 @@ export class RollupBuilder {
         source_summary_ids: JSON.stringify(summaries.map((summary) => summary.summaryId)),
         source_message_count: 0,
         source_token_count: totalSourceTokens,
-        status: "building",
+        status: "ready",
         coverage_start:
           summaries[0]?.earliestAt?.toISOString() ?? summaries[0]?.createdAt.toISOString() ?? null,
         coverage_end:
@@ -220,30 +215,6 @@ export class RollupBuilder {
           ordinal: index,
         })),
       );
-
-      this.store.upsertRollup({
-        rollup_id: rollupId,
-        conversation_id: conversationId,
-        period_kind: PERIOD_KIND,
-        period_key: dateKey,
-        period_start: start.toISOString(),
-        period_end: end.toISOString(),
-        timezone: this.config.timezone,
-        content: draft.content,
-        token_count: draft.summaryTokenCount,
-        source_summary_ids: JSON.stringify(summaries.map((summary) => summary.summaryId)),
-        source_message_count: 0,
-        source_token_count: totalSourceTokens,
-        status: "ready",
-        coverage_start:
-          summaries[0]?.earliestAt?.toISOString() ?? summaries[0]?.createdAt.toISOString() ?? null,
-        coverage_end:
-          summaries[summaries.length - 1]?.latestAt?.toISOString()
-          ?? summaries[summaries.length - 1]?.createdAt.toISOString()
-          ?? null,
-        summarizer_model: "concatenation-v1",
-        source_fingerprint: fingerprint,
-      });
 
       this.store.upsertState(conversationId, {
         timezone: this.config.timezone,
@@ -529,7 +500,7 @@ function parseDateKey(dateKey: string): Date {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
     throw new Error(`Invalid date key: ${dateKey}`);
   }
-  return new Date(`${dateKey}T12:00:00.000Z`);
+  return localDateTimeToUtc(dateKey, "00:00:00", "UTC");
 }
 
 function shiftLocalDate(date: Date, timezone: string, dayDelta: number): Date {

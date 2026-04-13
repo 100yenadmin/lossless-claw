@@ -568,18 +568,21 @@ function backfillToolCallColumns(db: DatabaseSync): void {
 }
 
 function getExistingTableNames(db: DatabaseSync, names: string[]): Set<string> {
-  if (names.length === 0) {
-    return new Set();
+  const existing = new Set<string>();
+  for (const name of names) {
+    const row = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table' AND name = ?
+         LIMIT 1`,
+      )
+      .get(name) as TableNameRow | undefined;
+    if (typeof row?.name === "string" && row.name.length > 0) {
+      existing.add(row.name);
+    }
   }
-  const placeholders = names.map(() => "?").join(", ");
-  const rows = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
-    .all(...names) as TableNameRow[];
-  return new Set(
-    rows
-      .map((row) => row.name)
-      .filter((name): name is string => typeof name === "string" && name.length > 0),
-  );
+  return existing;
 }
 
 function getFtsShadowTableNames(tableName: string): string[] {
@@ -937,6 +940,33 @@ export function runLcmMigrations(
       CREATE INDEX IF NOT EXISTS summaries_leaf_temporal_idx
         ON summaries (conversation_id, kind) WHERE kind = 'leaf';
     `);
+
+    const conversationTables = getExistingTableNames(db, ["conversations", "lcm_rollups", "lcm_rollup_state"]);
+    if (!conversationTables.has("conversations")) {
+      return;
+    }
+
+    const rollupColumns = db.prepare(`PRAGMA foreign_key_list(lcm_rollups)`).all() as Array<{ table?: string; from?: string }>;
+    const hasRollupConversationFk = rollupColumns.some(
+      (row) => row.table === "conversations" && row.from === "conversation_id",
+    );
+    if (!hasRollupConversationFk) {
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS lcm_rollups_conversation_id_fk_hint_idx
+          ON lcm_rollups (conversation_id)`,
+      );
+    }
+
+    const stateColumns = db.prepare(`PRAGMA foreign_key_list(lcm_rollup_state)`).all() as Array<{ table?: string; from?: string }>;
+    const hasStateConversationFk = stateColumns.some(
+      (row) => row.table === "conversations" && row.from === "conversation_id",
+    );
+    if (!hasStateConversationFk) {
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS lcm_rollup_state_conversation_id_fk_hint_idx
+          ON lcm_rollup_state (conversation_id)`,
+      );
+    }
   });
   runMigrationStep("ensureRollupViews", log, () => {
     db.exec(`

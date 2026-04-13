@@ -1877,6 +1877,8 @@ function wirePluginHandlers(
   api.registerTool((ctx) =>
     createLcmRecentTool({ deps, getLcm: shared.waitForEngine, sessionKey: ctx.sessionKey }),
   );
+  // TODO(lossless-claw Phase 2): wire rollup-builder maintenance into maintain()
+  // so temporal rollup upkeep runs alongside transcript GC lifecycle work.
 
   api.registerCommand(
     createLcmCommand({ db: shared.waitForDatabase, config: deps.config, deps }),
