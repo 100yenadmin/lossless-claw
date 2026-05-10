@@ -5200,6 +5200,174 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(bootstrapState?.transcriptBaseCreatedAt).toBe(frontier.baseCreatedAt);
   });
 
+  it("matches live ingest message-part fidelity for tool-heavy SQLite bootstrap transcripts", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    const sessionId = "sqlite-bootstrap-tool-parity";
+    const sessionKey = "agent:main:sqlite-bootstrap-tool-parity";
+    const toolMessages: AgentMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_bootstrap",
+            name: "read",
+            input: { path: "foo.txt" },
+          },
+        ],
+      } as AgentMessage,
+      {
+        role: "toolResult",
+        toolCallId: "call_bootstrap",
+        toolName: "read",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_bootstrap",
+            content: [{ type: "text", text: "bootstrap tool output" }],
+          },
+        ],
+      } as AgentMessage,
+    ];
+    const events = createSqliteTranscriptMessageEvents({
+      sessionId,
+      messages: toolMessages,
+    });
+    const frontier = createSqliteTranscriptFrontier(sessionId, events);
+    const bootstrapDb = createLcmDatabaseConnection(join(tempDir, "bootstrap.db"));
+    const bootstrapDeps = createTestDeps({
+      ...config,
+      databasePath: join(tempDir, "bootstrap.db"),
+    }) as LcmDependencies & {
+      getSqliteSessionTranscriptFrontier: ReturnType<typeof vi.fn>;
+      loadSqliteSessionTranscriptDelta: ReturnType<typeof vi.fn>;
+    };
+    bootstrapDeps.getSqliteSessionTranscriptFrontier = vi.fn(async () => frontier);
+    bootstrapDeps.loadSqliteSessionTranscriptDelta = vi.fn(
+      async (): Promise<MockSqliteTranscriptDelta> => ({
+        mode: "reset",
+        frontier,
+        events,
+      }),
+    );
+    const bootstrapEngine = new LcmContextEngine(bootstrapDeps, bootstrapDb);
+
+    const bootstrapResult = await bootstrapEngine.bootstrap({
+      sessionId,
+      sessionKey,
+      sessionFile: "/tmp/sqlite-bootstrap-tool-parity.jsonl",
+    });
+    expect(bootstrapResult).toEqual({
+      bootstrapped: true,
+      importedMessages: 2,
+    });
+
+    const liveEngine = createEngine();
+    for (const message of toolMessages) {
+      await liveEngine.ingest({ sessionId, sessionKey, message });
+    }
+
+    const bootstrapConversation = await bootstrapEngine
+      .getConversationStore()
+      .getConversationForSession({ sessionId, sessionKey });
+    const liveConversation = await liveEngine
+      .getConversationStore()
+      .getConversationForSession({ sessionId, sessionKey });
+    expect(bootstrapConversation).not.toBeNull();
+    expect(liveConversation).not.toBeNull();
+
+    const bootstrapMessages = await bootstrapEngine
+      .getConversationStore()
+      .getMessages(bootstrapConversation!.conversationId);
+    const liveMessages = await liveEngine
+      .getConversationStore()
+      .getMessages(liveConversation!.conversationId);
+
+    expect(
+      bootstrapMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+    ).toEqual(
+      liveMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+    );
+
+    const normalizeParts = async (
+      engine: LcmContextEngine,
+      conversationId: number,
+    ): Promise<
+      Array<{
+        role: string;
+        partType: string;
+        ordinal: number;
+        textContent: string | null;
+        toolCallId: string | null;
+        toolName: string | null;
+        toolInput: string | null;
+        toolOutput: string | null;
+        metadata: Record<string, unknown>;
+      }>
+    > => {
+      const messages = await engine.getConversationStore().getMessages(conversationId);
+      const rows: Array<{
+        role: string;
+        partType: string;
+        ordinal: number;
+        textContent: string | null;
+        toolCallId: string | null;
+        toolName: string | null;
+        toolInput: string | null;
+        toolOutput: string | null;
+        metadata: Record<string, unknown>;
+      }> = [];
+      for (const message of messages) {
+        const parts = await engine.getConversationStore().getMessageParts(message.messageId);
+        for (const part of parts) {
+          const metadata = JSON.parse(part.metadata ?? "{}") as Record<string, unknown>;
+          rows.push({
+            role: message.role,
+            partType: part.partType,
+            ordinal: part.ordinal,
+            textContent: part.textContent,
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            toolInput: part.toolInput,
+            toolOutput: part.toolOutput,
+            metadata: {
+              originalRole: metadata.originalRole,
+              rawType: metadata.rawType,
+              isError: metadata.isError,
+            },
+          });
+        }
+      }
+      return rows;
+    };
+
+    expect(
+      await normalizeParts(bootstrapEngine, bootstrapConversation!.conversationId),
+    ).toEqual(await normalizeParts(liveEngine, liveConversation!.conversationId));
+
+    const bootstrapAssembled = await bootstrapEngine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    const liveAssembled = await liveEngine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    expect(bootstrapAssembled.messages).toEqual(liveAssembled.messages);
+  });
+
   it("resumes from a stored SQLite cursor and ingests only appended transcript messages", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
     tempDirs.push(tempDir);

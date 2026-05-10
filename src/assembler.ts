@@ -360,12 +360,12 @@ export function toolResultBlockFromPart(
 
   if (output !== undefined) {
     block.output = output;
-  } else if (typeof part.textContent === "string") {
-    block.output = part.textContent;
   } else if (raw && raw.output !== undefined) {
     block.output = raw.output;
   } else if (raw && raw.content !== undefined) {
     block.content = raw.content;
+  } else if (typeof part.textContent === "string") {
+    block.output = part.textContent;
   } else {
     block.output = "";
   }
