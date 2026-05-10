@@ -1001,7 +1001,7 @@ describe("LcmContextEngine stateless sessions", () => {
 });
 
 describe("ConversationStore session reuse", () => {
-  it("reuses conversation across session resets when sessionKey matches", async () => {
+  it("keeps family and segment stable while the runtime session id changes inside one active conversation", async () => {
     const engine = createEngine();
     (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
     const store = engine.getConversationStore();
@@ -1010,9 +1010,13 @@ describe("ConversationStore session reuse", () => {
     const conv2 = await store.getOrCreateConversation("uuid-2", { sessionKey: "agent:main:main" });
 
     expect(conv2.conversationId).toBe(conv1.conversationId);
+    expect(conv2.familyKey).toBe(conv1.familyKey);
+    expect(conv2.segmentKey).toBe(conv1.segmentKey);
 
     const refreshed = await store.getConversation(conv1.conversationId);
     expect(refreshed?.sessionId).toBe("uuid-2");
+    expect(refreshed?.familyKey).toBe("agent:main:main");
+    expect(refreshed?.segmentKey).toBe(conv1.segmentKey);
   });
 });
 
@@ -1079,6 +1083,10 @@ describe("LcmContextEngine before_reset lifecycle", () => {
       sessionId: "uuid-2",
       sessionKey: "agent:main:main",
     });
+
+    const refreshed = await conversationStore.getConversation(conversation.conversationId);
+    expect(refreshed?.familyKey).toBe(conversation.familyKey);
+    expect(refreshed?.segmentKey).toBe(conversation.segmentKey);
 
     const remainingItems = await summaryStore.getContextItems(conversation.conversationId);
     expect(remainingItems).toHaveLength(1);
@@ -1189,6 +1197,8 @@ describe("LcmContextEngine before_reset lifecycle", () => {
 
     expect(active).not.toBeNull();
     expect(active?.conversationId).not.toBe(original.conversationId);
+    expect(active?.familyKey).toBe(original.familyKey);
+    expect(active?.segmentKey).not.toBe(original.segmentKey);
     expect(active?.active).toBe(true);
     expect(archived?.active).toBe(false);
     expect(archived?.archivedAt).not.toBeNull();
@@ -1209,6 +1219,7 @@ describe("LcmContextEngine before_reset lifecycle", () => {
     expect(active).not.toBeNull();
     expect(active?.active).toBe(true);
     expect(active?.sessionId).toBe("uuid-1");
+    expect(active?.familyKey).toBe("agent:main:main");
   });
 
   it("treats repeated /reset on an already fresh conversation as a no-op", async () => {
@@ -1243,6 +1254,9 @@ describe("LcmContextEngine before_reset lifecycle", () => {
 
     expect(firstFresh?.conversationId).not.toBe(original.conversationId);
     expect(secondFresh?.conversationId).toBe(firstFresh?.conversationId);
+    expect(firstFresh?.familyKey).toBe(original.familyKey);
+    expect(firstFresh?.segmentKey).not.toBe(original.segmentKey);
+    expect(secondFresh?.segmentKey).toBe(firstFresh?.segmentKey);
   });
 });
 
@@ -1273,9 +1287,10 @@ describe("LcmContextEngine session_end lifecycle", () => {
     const active = await store.getConversationBySessionKey("agent:main:main");
     expect(active?.conversationId).toBe(original.conversationId);
     expect(active?.active).toBe(true);
+    expect(active?.segmentKey).toBe(original.segmentKey);
   });
 
-  it("archives the prior active conversation and creates a fresh active row on idle rollover", async () => {
+  it("archives the prior active conversation and creates a fresh segment in the same family on idle rollover", async () => {
     const engine = createEngine();
     (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
     const store = engine.getConversationStore();
@@ -1304,7 +1319,44 @@ describe("LcmContextEngine session_end lifecycle", () => {
     expect(active).not.toBeNull();
     expect(active?.conversationId).not.toBe(original.conversationId);
     expect(active?.sessionId).toBe("uuid-2");
+    expect(active?.familyKey).toBe(original.familyKey);
+    expect(active?.segmentKey).not.toBe(original.segmentKey);
     expect(active?.active).toBe(true);
+    expect(archived?.active).toBe(false);
+    expect(archived?.archivedAt).not.toBeNull();
+  });
+
+  it("archives the prior active conversation and creates a fresh segment in the same family on daily rollover", async () => {
+    const engine = createEngine();
+    (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+    const store = engine.getConversationStore();
+
+    const original = await store.getOrCreateConversation("uuid-1", {
+      sessionKey: "agent:main:main",
+    });
+    await store.createMessage({
+      conversationId: original.conversationId,
+      seq: 1,
+      role: "user",
+      content: "seed",
+      tokenCount: 5,
+    });
+
+    await engine.handleSessionEnd({
+      reason: "daily",
+      sessionId: "uuid-1",
+      sessionKey: "agent:main:main",
+      nextSessionId: "uuid-2",
+    });
+
+    const active = await store.getConversationBySessionKey("agent:main:main");
+    const archived = await store.getConversation(original.conversationId);
+
+    expect(active).not.toBeNull();
+    expect(active?.conversationId).not.toBe(original.conversationId);
+    expect(active?.sessionId).toBe("uuid-2");
+    expect(active?.familyKey).toBe(original.familyKey);
+    expect(active?.segmentKey).not.toBe(original.segmentKey);
     expect(archived?.active).toBe(false);
     expect(archived?.archivedAt).not.toBeNull();
   });
@@ -1337,6 +1389,7 @@ describe("LcmContextEngine session_end lifecycle", () => {
     expect(active).toBeNull();
     expect(archived?.active).toBe(false);
     expect(archived?.archivedAt).not.toBeNull();
+    expect(archived?.familyKey).toBe(original.familyKey);
   });
 
   it("treats session_end reset after before_reset as a no-op on the fresh replacement row", async () => {
@@ -1372,6 +1425,9 @@ describe("LcmContextEngine session_end lifecycle", () => {
 
     expect(firstFresh?.conversationId).not.toBe(original.conversationId);
     expect(secondFresh?.conversationId).toBe(firstFresh?.conversationId);
+    expect(firstFresh?.familyKey).toBe(original.familyKey);
+    expect(firstFresh?.segmentKey).not.toBe(original.segmentKey);
+    expect(secondFresh?.segmentKey).toBe(firstFresh?.segmentKey);
   });
 });
 

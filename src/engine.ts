@@ -7636,12 +7636,14 @@ export class LcmContextEngine implements ContextEngine {
       return;
     }
     const nextSessionKey = params.nextSessionKey?.trim() || params.sessionKey?.trim() || current?.sessionKey;
+    const nextFamilyKey = current?.familyKey ?? nextSessionKey ?? nextSessionId;
     const freshConversation = await this.conversationStore.createConversation({
       sessionId: nextSessionId,
       ...(nextSessionKey ? { sessionKey: nextSessionKey } : {}),
+      familyKey: nextFamilyKey,
     });
     this.deps.log.info(
-      `[lcm] ${params.reason} lifecycle archived prior conversation and created ${freshConversation.conversationId}`,
+      `[lcm] ${params.reason} lifecycle archived prior conversation and created ${freshConversation.conversationId} family=${freshConversation.familyKey ?? "(none)"} segment=${freshConversation.segmentKey}`,
     );
   }
 

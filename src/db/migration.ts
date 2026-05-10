@@ -216,6 +216,40 @@ function ensureBootstrapStateColumns(db: DatabaseSync): void {
   `);
 }
 
+function ensureConversationIdentityColumns(db: DatabaseSync): void {
+  const conversationColumns = db.prepare(`PRAGMA table_info(conversations)`).all() as SummaryColumnInfo[];
+  const hasFamilyKey = conversationColumns.some((col) => col.name === "family_key");
+  const hasSegmentKey = conversationColumns.some((col) => col.name === "segment_key");
+
+  if (!hasFamilyKey) {
+    db.exec(`ALTER TABLE conversations ADD COLUMN family_key TEXT`);
+  }
+  if (!hasSegmentKey) {
+    db.exec(`ALTER TABLE conversations ADD COLUMN segment_key TEXT`);
+  }
+
+  db.exec(`
+    UPDATE conversations
+    SET family_key = COALESCE(NULLIF(family_key, ''), NULLIF(session_key, ''), NULLIF(session_id, '')),
+        segment_key = COALESCE(NULLIF(segment_key, ''), 'segment:' || conversation_id)
+  `);
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS conversations_active_family_key_idx
+    ON conversations (family_key)
+    WHERE family_key IS NOT NULL AND active = 1
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS conversations_family_key_active_created_idx
+    ON conversations (family_key, active, created_at)
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS conversations_segment_key_idx
+    ON conversations (segment_key)
+    WHERE segment_key IS NOT NULL
+  `);
+}
+
 /**
  * Belt-and-suspenders guard: create `message_parts` if it does not yet exist.
  *
@@ -865,6 +899,8 @@ export function runLcmMigrations(
       conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       session_key TEXT,
+      family_key TEXT,
+      segment_key TEXT,
       active INTEGER NOT NULL DEFAULT 1,
       archived_at TEXT,
       title TEXT,
@@ -1096,6 +1132,9 @@ export function runLcmMigrations(
       ON conversations (session_id, active, created_at)
     `);
     db.exec(`DROP INDEX IF EXISTS conversations_session_key_idx`);
+    runMigrationStep("ensureConversationIdentityColumns", log, () =>
+      ensureConversationIdentityColumns(db),
+    );
     runMigrationStep("ensureSummaryDepthColumn", log, () => ensureSummaryDepthColumn(db));
     runMigrationStep("ensureSummaryMetadataColumns", log, () =>
       ensureSummaryMetadataColumns(db),
