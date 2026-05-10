@@ -594,4 +594,116 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
     const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
     expect(stored).toHaveLength(resetMessages.length);
   });
+
+  it("preserves tool message_parts across bootstrap and re-bootstrap without flattening", async () => {
+    const engine = createEngine();
+    const sessionId = randomUUID();
+    const sessionFile = createSessionFilePath("bootstrap-tool-parts-stable");
+    const sm = SessionManager.open(sessionFile);
+
+    sm.appendMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call_bootstrap_roundtrip",
+          name: "read",
+          input: { path: "foo.txt" },
+        },
+      ],
+    } as AgentMessage);
+    sm.appendMessage({
+      role: "toolResult",
+      toolCallId: "call_bootstrap_roundtrip",
+      toolName: "read",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "call_bootstrap_roundtrip",
+          content: [{ type: "text", text: "bootstrap roundtrip output" }],
+        },
+      ],
+    } as AgentMessage);
+
+    const first = await engine.bootstrap({ sessionId, sessionFile });
+    expect(first).toEqual({
+      bootstrapped: true,
+      importedMessages: 2,
+    });
+
+    const conversation = await engine
+      .getConversationStore()
+      .getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+
+    const beforeMessages = await engine
+      .getConversationStore()
+      .getMessages(conversation!.conversationId);
+    expect(beforeMessages).toHaveLength(2);
+
+    const beforeParts = await Promise.all(
+      beforeMessages.map(async (message) => ({
+        role: message.role,
+        parts: (await engine.getConversationStore().getMessageParts(message.messageId)).map((part) => ({
+          partType: part.partType,
+          ordinal: part.ordinal,
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          textContent: part.textContent,
+          toolOutput: part.toolOutput,
+        })),
+      })),
+    );
+    expect(beforeParts).toEqual([
+      {
+        role: "assistant",
+        parts: [
+          {
+            partType: "tool",
+            ordinal: 0,
+            toolCallId: "call_bootstrap_roundtrip",
+            toolName: "read",
+            textContent: null,
+            toolOutput: null,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        parts: [
+          {
+            partType: "tool",
+            ordinal: 0,
+            toolCallId: "call_bootstrap_roundtrip",
+            toolName: "read",
+            textContent: null,
+            toolOutput: null,
+          },
+        ],
+      },
+    ]);
+
+    const second = await engine.bootstrap({ sessionId, sessionFile });
+    expect(second.importedMessages).toBe(0);
+
+    const afterMessages = await engine
+      .getConversationStore()
+      .getMessages(conversation!.conversationId);
+    const afterParts = await Promise.all(
+      afterMessages.map(async (message) => ({
+        role: message.role,
+        parts: (await engine.getConversationStore().getMessageParts(message.messageId)).map((part) => ({
+          partType: part.partType,
+          ordinal: part.ordinal,
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          textContent: part.textContent,
+          toolOutput: part.toolOutput,
+        })),
+      })),
+    );
+
+    expect(afterMessages).toHaveLength(beforeMessages.length);
+    expect(afterParts).toEqual(beforeParts);
+  });
 });

@@ -436,6 +436,33 @@ describe("blockFromPart", () => {
     expect(block).not.toHaveProperty("metadata");
   });
 
+  it("does not degrade bootstrap-origin tool results to assistant text when raw structured content exists", () => {
+    const part = makePart({
+      partType: "tool",
+      toolCallId: "call-bootstrap",
+      toolName: "read",
+      textContent: "[LCM Tool Output: file_bootstrap tool=read]",
+      toolOutput: null,
+      metadata: JSON.stringify({
+        rawType: "tool_result",
+        originalRole: "toolResult",
+        raw: {
+          type: "tool_result",
+          tool_use_id: "call-bootstrap",
+          name: "read",
+          content: [{ type: "text", text: "bootstrap tool output" }],
+        },
+      }),
+    });
+    const block = blockFromPart(part) as Record<string, unknown>;
+
+    expect(block.type).toBe("tool_result");
+    expect(block.tool_use_id).toBe("call-bootstrap");
+    expect(block.name).toBe("read");
+    expect(block.content).toEqual([{ type: "text", text: "bootstrap tool output" }]);
+    expect(block).not.toHaveProperty("text");
+  });
+
   it("falls back to text block for text parts without metadata", () => {
     const part = makePart({
       partType: "text",
