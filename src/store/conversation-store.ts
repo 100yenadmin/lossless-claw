@@ -74,6 +74,8 @@ export type MessagePartRecord = {
 export type CreateConversationInput = {
   sessionId: string;
   sessionKey?: string;
+  familyKey?: string;
+  segmentKey?: string;
   title?: string;
   active?: boolean;
   archivedAt?: Date | null;
@@ -83,6 +85,8 @@ export type ConversationRecord = {
   conversationId: ConversationId;
   sessionId: string;
   sessionKey: string | null;
+  familyKey: string | null;
+  segmentKey: string;
   active: boolean;
   archivedAt: Date | null;
   title: string | null;
@@ -117,6 +121,8 @@ interface ConversationRow {
   conversation_id: number;
   session_id: string;
   session_key: string | null;
+  family_key: string | null;
+  segment_key: string;
   active: number;
   archived_at: string | null;
   title: string | null;
@@ -173,6 +179,8 @@ function toConversationRecord(row: ConversationRow): ConversationRecord {
     conversationId: row.conversation_id,
     sessionId: row.session_id,
     sessionKey: row.session_key ?? null,
+    familyKey: row.family_key ?? row.session_key ?? null,
+    segmentKey: row.segment_key,
     active: row.active === 1,
     archivedAt: parseUtcTimestampOrNull(row.archived_at),
     title: row.title,
@@ -263,6 +271,20 @@ function normalizeMessageContentForFullTextIndex(content: string): string | null
   return normalized || null;
 }
 
+const CONVERSATION_SELECT_COLUMNS = `
+  conversation_id,
+  session_id,
+  session_key,
+  family_key,
+  segment_key,
+  active,
+  archived_at,
+  title,
+  bootstrapped_at,
+  created_at,
+  updated_at
+`;
+
 // ── ConversationStore ─────────────────────────────────────────────────────────
 
 export class ConversationStore {
@@ -284,15 +306,30 @@ export class ConversationStore {
   // ── Conversation operations ───────────────────────────────────────────────
 
   async createConversation(input: CreateConversationInput): Promise<ConversationRecord> {
+    const normalizedSessionId = input.sessionId.trim();
+    const normalizedSessionKey = input.sessionKey?.trim();
+    const normalizedFamilyKey = input.familyKey?.trim() || normalizedSessionKey || normalizedSessionId;
+    const normalizedSegmentKey = input.segmentKey?.trim() || randomUUID();
+
     try {
       const result = this.db
         .prepare(
-          `INSERT INTO conversations (session_id, session_key, active, archived_at, title)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO conversations (
+             session_id,
+             session_key,
+             family_key,
+             segment_key,
+             active,
+             archived_at,
+             title
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          input.sessionId,
-          input.sessionKey ?? null,
+          normalizedSessionId,
+          normalizedSessionKey ?? null,
+          normalizedFamilyKey,
+          normalizedSegmentKey,
           input.active === false ? 0 : 1,
           input.archivedAt?.toISOString() ?? null,
           input.title ?? null,
@@ -300,7 +337,7 @@ export class ConversationStore {
 
       const row = this.db
         .prepare(
-          `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+          `SELECT ${CONVERSATION_SELECT_COLUMNS}
          FROM conversations WHERE conversation_id = ?`,
         )
         .get(Number(result.lastInsertRowid)) as unknown as ConversationRow;
@@ -312,11 +349,13 @@ export class ConversationStore {
         err instanceof Error &&
         /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(err.message)
       ) {
-        if (input.sessionKey) {
-          const existing = await this.getConversationBySessionKey(input.sessionKey);
+        if (normalizedSessionKey) {
+          const existing = await this.getConversationBySessionKey(normalizedSessionKey);
           if (existing) return existing;
         }
-        const existing = await this.getConversationBySessionId(input.sessionId);
+        const byFamily = await this.getConversationByFamilyKey(normalizedFamilyKey);
+        if (byFamily) return byFamily;
+        const existing = await this.getConversationBySessionId(normalizedSessionId);
         if (existing) return existing;
       }
       throw err;
@@ -326,7 +365,7 @@ export class ConversationStore {
   async getConversation(conversationId: ConversationId): Promise<ConversationRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+        `SELECT ${CONVERSATION_SELECT_COLUMNS}
        FROM conversations WHERE conversation_id = ?`,
       )
       .get(conversationId) as unknown as ConversationRow | undefined;
@@ -337,7 +376,7 @@ export class ConversationStore {
   async getConversationBySessionId(sessionId: string): Promise<ConversationRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+        `SELECT ${CONVERSATION_SELECT_COLUMNS}
        FROM conversations
        WHERE session_id = ?
        ORDER BY active DESC, created_at DESC
@@ -351,7 +390,7 @@ export class ConversationStore {
   async getConversationBySessionKey(sessionKey: string): Promise<ConversationRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+        `SELECT ${CONVERSATION_SELECT_COLUMNS}
        FROM conversations
        WHERE session_key = ?
          AND active = 1
@@ -359,6 +398,21 @@ export class ConversationStore {
        LIMIT 1`,
       )
       .get(sessionKey) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  private async getConversationByFamilyKey(familyKey: string): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT ${CONVERSATION_SELECT_COLUMNS}
+         FROM conversations
+         WHERE family_key = ?
+           AND active = 1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get(familyKey) as unknown as ConversationRow | undefined;
 
     return row ? toConversationRecord(row) : null;
   }
@@ -379,16 +433,16 @@ export class ConversationStore {
       return [];
     }
 
-    const normalizedSessionKey = baseConversation.sessionKey?.trim();
-    if (normalizedSessionKey) {
+    const normalizedFamilyKey = baseConversation.familyKey?.trim();
+    if (normalizedFamilyKey) {
       const rows = this.db
         .prepare(
           `SELECT conversation_id
            FROM conversations
-           WHERE session_key = ?
+           WHERE family_key = ?
            ORDER BY active DESC, created_at DESC, conversation_id DESC`,
         )
-        .all(normalizedSessionKey) as Array<{ conversation_id: number }>;
+        .all(normalizedFamilyKey) as Array<{ conversation_id: number }>;
       return rows.map((row) => row.conversation_id);
     }
 
@@ -432,7 +486,7 @@ export class ConversationStore {
         : 1000;
     const rows = this.db
       .prepare(
-        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+        `SELECT ${CONVERSATION_SELECT_COLUMNS}
          FROM conversations
          WHERE active = 1
          ORDER BY updated_at DESC, conversation_id DESC
@@ -445,26 +499,33 @@ export class ConversationStore {
 
   async getOrCreateConversation(
     sessionId: string,
-    titleOrOpts?: string | { title?: string; sessionKey?: string },
+    titleOrOpts?: string | { title?: string; sessionKey?: string; familyKey?: string; segmentKey?: string },
   ): Promise<ConversationRecord> {
     const opts = typeof titleOrOpts === "string" ? { title: titleOrOpts } : titleOrOpts ?? {};
+    const normalizedSessionId = sessionId.trim();
     const normalizedSessionKey = opts.sessionKey?.trim();
+    const normalizedFamilyKey = opts.familyKey?.trim() || normalizedSessionKey || normalizedSessionId;
     if (normalizedSessionKey) {
       const byKey = await this.getConversationBySessionKey(normalizedSessionKey);
       if (byKey) {
-        if (byKey.sessionId !== sessionId) {
+        if (byKey.sessionId !== normalizedSessionId || byKey.familyKey !== normalizedFamilyKey) {
           this.db
             .prepare(
-              `UPDATE conversations SET session_id = ?, updated_at = datetime('now') WHERE conversation_id = ?`,
+              `UPDATE conversations
+               SET session_id = ?,
+                   family_key = ?,
+                   updated_at = datetime('now')
+               WHERE conversation_id = ?`,
             )
-            .run(sessionId, byKey.conversationId);
-          byKey.sessionId = sessionId;
+            .run(normalizedSessionId, normalizedFamilyKey, byKey.conversationId);
+          byKey.sessionId = normalizedSessionId;
+          byKey.familyKey = normalizedFamilyKey;
         }
         return byKey;
       }
     }
 
-    const existing = await this.getConversationBySessionId(sessionId);
+    const existing = await this.getConversationBySessionId(normalizedSessionId);
     if (existing) {
       if (!normalizedSessionKey) {
         return existing;
@@ -472,10 +533,15 @@ export class ConversationStore {
       if (existing.active && !existing.sessionKey) {
         this.db
           .prepare(
-            `UPDATE conversations SET session_key = ?, updated_at = datetime('now') WHERE conversation_id = ?`,
+            `UPDATE conversations
+             SET session_key = ?,
+                 family_key = ?,
+                 updated_at = datetime('now')
+             WHERE conversation_id = ?`,
           )
-          .run(normalizedSessionKey, existing.conversationId);
+          .run(normalizedSessionKey, normalizedFamilyKey, existing.conversationId);
         existing.sessionKey = normalizedSessionKey;
+        existing.familyKey = normalizedFamilyKey;
         return existing;
       }
       if (existing.active && existing.sessionKey === normalizedSessionKey) {
@@ -483,7 +549,13 @@ export class ConversationStore {
       }
     }
 
-    return this.createConversation({ sessionId, title: opts.title, sessionKey: normalizedSessionKey });
+    return this.createConversation({
+      sessionId: normalizedSessionId,
+      title: opts.title,
+      sessionKey: normalizedSessionKey,
+      familyKey: normalizedFamilyKey,
+      segmentKey: opts.segmentKey,
+    });
   }
 
   async markConversationBootstrapped(conversationId: ConversationId): Promise<void> {

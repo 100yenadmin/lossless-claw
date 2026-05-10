@@ -31,8 +31,8 @@ function createStores(db: DatabaseSync) {
 
 // ── Session Key Continuity (#106, #107) ─────────────────────────────────────
 
-describe("Session key continuity", () => {
-  it("reuses conversation across multiple sequential resets", async () => {
+describe("OpenClaw continuity identities", () => {
+  it("keeps the same family and segment while runtime sessions churn inside one active conversation", async () => {
     const db = createTestDb();
     const { convStore } = createStores(db);
 
@@ -42,9 +42,16 @@ describe("Session key continuity", () => {
 
     expect(conv1.conversationId).toBe(conv2.conversationId);
     expect(conv2.conversationId).toBe(conv3.conversationId);
+    expect(conv1.familyKey).toBe("agent:main:main");
+    expect(conv2.familyKey).toBe(conv1.familyKey);
+    expect(conv3.familyKey).toBe(conv1.familyKey);
+    expect(conv2.segmentKey).toBe(conv1.segmentKey);
+    expect(conv3.segmentKey).toBe(conv1.segmentKey);
 
     const refreshed = await convStore.getConversation(conv1.conversationId);
     expect(refreshed?.sessionId).toBe("uuid-3");
+    expect(refreshed?.familyKey).toBe("agent:main:main");
+    expect(refreshed?.segmentKey).toBe(conv1.segmentKey);
   });
 
   it("creates separate conversations for different sessionKeys", async () => {
@@ -81,9 +88,11 @@ describe("Session key continuity", () => {
     const byKey = await convStore.getConversationBySessionKey("agent:main:main");
     expect(byKey?.conversationId).toBe(active.conversationId);
     expect(byKey?.active).toBe(true);
+    expect(byKey?.familyKey).toBe("agent:main:main");
+    expect(byKey?.segmentKey).toBe(active.segmentKey);
   });
 
-  it("creates a fresh active conversation instead of reusing an archived row", async () => {
+  it("creates a fresh segment in the same family instead of reusing an archived row", async () => {
     const db = createTestDb();
     const { convStore } = createStores(db);
 
@@ -106,6 +115,8 @@ describe("Session key continuity", () => {
     expect(fresh.conversationId).not.toBe(archived.conversationId);
     expect(fresh.active).toBe(true);
     expect(fresh.archivedAt).toBeNull();
+    expect(fresh.familyKey).toBe(archived.familyKey);
+    expect(fresh.segmentKey).not.toBe(archived.segmentKey);
   });
 
   it("backfills sessionKey when found by sessionId", async () => {
@@ -115,10 +126,13 @@ describe("Session key continuity", () => {
     // Create without sessionKey (legacy path)
     const conv1 = await convStore.getOrCreateConversation("uuid-1");
     expect(conv1.sessionKey).toBeNull();
+    expect(conv1.familyKey).toBe("uuid-1");
 
     // Re-fetch with sessionKey — should backfill
     const conv2 = await convStore.getOrCreateConversation("uuid-1", { sessionKey: "agent:main:main" });
     expect(conv2.conversationId).toBe(conv1.conversationId);
+    expect(conv2.familyKey).toBe("agent:main:main");
+    expect(conv2.segmentKey).toBe(conv1.segmentKey);
 
     // Verify backfill persisted
     const byKey = await convStore.getConversationBySessionKey("agent:main:main");
