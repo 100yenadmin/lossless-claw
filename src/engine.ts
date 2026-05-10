@@ -462,6 +462,40 @@ function listTranscriptToolResultEntryIdsByCallId(sessionFile: string): Map<stri
   return entryIdsByCallId;
 }
 
+function listSqliteTranscriptToolResultEntryIdsByCallId(
+  events: SqliteSessionTranscriptEvent[],
+): Map<string, string> {
+  const entryIdsByCallId = new Map<string, string>();
+  const duplicateCallIds = new Set<string>();
+
+  for (const entry of events) {
+    const eventRecord = asRecord(entry.event);
+    if (!eventRecord) {
+      continue;
+    }
+    const message = extractBootstrapMessageCandidate(entry.event);
+    if (!message || message.role !== "toolResult") {
+      continue;
+    }
+    const entryId = safeString(eventRecord.id);
+    const toolCallId = extractTranscriptToolCallId(message);
+    if (!entryId || !toolCallId) {
+      continue;
+    }
+    if (entryIdsByCallId.has(toolCallId)) {
+      duplicateCallIds.add(toolCallId);
+      continue;
+    }
+    entryIdsByCallId.set(toolCallId, entryId);
+  }
+
+  for (const duplicateCallId of duplicateCallIds) {
+    entryIdsByCallId.delete(duplicateCallId);
+  }
+
+  return entryIdsByCallId;
+}
+
 function isRotatePreservedEntryType(type: string): boolean {
   return (
     type === "message" ||
@@ -4983,6 +5017,48 @@ export class LcmContextEngine implements ContextEngine {
     };
   }
 
+  private async listCanonicalTranscriptToolResultEntryIdsByCallId(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile: string;
+  }): Promise<Map<string, string>> {
+    const sqliteScope = this.resolveSqliteTranscriptScope(params);
+    if (sqliteScope && this.deps.loadSqliteSessionTranscriptDelta) {
+      const delta = await this.deps.loadSqliteSessionTranscriptDelta(sqliteScope);
+      if (delta.mode === "missing") {
+        return new Map();
+      }
+      return listSqliteTranscriptToolResultEntryIdsByCallId(delta.events);
+    }
+    return listTranscriptToolResultEntryIdsByCallId(params.sessionFile);
+  }
+
+  private async refreshBootstrapStateForCanonicalTranscript(params: {
+    conversationId: number;
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile: string;
+  }): Promise<void> {
+    const sqliteScope = this.resolveSqliteTranscriptScope(params);
+    if (sqliteScope && this.deps.getSqliteSessionTranscriptFrontier) {
+      const frontier = await this.deps.getSqliteSessionTranscriptFrontier(sqliteScope);
+      if (frontier) {
+        await this.refreshBootstrapState({
+          conversationId: params.conversationId,
+          sessionFile: params.sessionFile,
+          sqliteScope,
+          sqliteFrontier: frontier,
+        });
+        return;
+      }
+    }
+
+    await this.refreshBootstrapState({
+      conversationId: params.conversationId,
+      sessionFile: params.sessionFile,
+    });
+  }
+
   private async bootstrapFromHistoricalMessages(params: {
     conversation: ConversationRecord;
     existingCount: number;
@@ -6212,9 +6288,12 @@ export class LcmContextEngine implements ContextEngine {
           };
         }
 
-        const transcriptEntryIdsByCallId = listTranscriptToolResultEntryIdsByCallId(
-          params.sessionFile,
-        );
+        const transcriptEntryIdsByCallId =
+          await this.listCanonicalTranscriptToolResultEntryIdsByCallId({
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            sessionFile: params.sessionFile,
+          });
         const replacements: TranscriptRewriteReplacement[] = [];
         const seenEntryIds = new Set<string>();
 
@@ -6257,8 +6336,10 @@ export class LcmContextEngine implements ContextEngine {
         if (result.changed) {
           this.clearStableOrphanStrippingOrdinal(conversation.conversationId);
           try {
-            await this.refreshBootstrapState({
+            await this.refreshBootstrapStateForCanonicalTranscript({
               conversationId: conversation.conversationId,
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
               sessionFile: params.sessionFile,
             });
           } catch (e) {
@@ -7719,8 +7800,38 @@ export class LcmContextEngine implements ContextEngine {
       return;
     }
 
-    const createReplacement = reason !== "deleted";
     this.ensureMigrated();
+    if (reason === "compaction") {
+      await this.withSessionQueue(
+        this.resolveSessionQueueKey(
+          params.nextSessionId ?? params.sessionId,
+          params.sessionKey ?? params.nextSessionKey,
+        ),
+        async () =>
+          this.conversationStore.withTransaction(async () => {
+            const continuationSessionId =
+              params.nextSessionId?.trim() || params.sessionId?.trim();
+            const continuationSessionKey =
+              params.nextSessionKey?.trim() || params.sessionKey?.trim();
+            if (!continuationSessionId) {
+              this.deps.log.warn(
+                "[lcm] session_end:compaction lifecycle skipped: no successor session id available",
+              );
+              return;
+            }
+            const continuedConversation = await this.conversationStore.getOrCreateConversation(
+              continuationSessionId,
+              continuationSessionKey ? { sessionKey: continuationSessionKey } : {},
+            );
+            this.deps.log.info(
+              `[lcm] session_end:compaction lifecycle preserved conversation=${continuedConversation.conversationId} family=${continuedConversation.familyKey ?? "(none)"} segment=${continuedConversation.segmentKey}`,
+            );
+          }),
+      );
+      return;
+    }
+
+    const createReplacement = reason !== "deleted";
     await this.withSessionQueue(
       this.resolveSessionQueueKey(params.nextSessionId ?? params.sessionId, params.sessionKey ?? params.nextSessionKey),
       async () =>
