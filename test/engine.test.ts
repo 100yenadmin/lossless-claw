@@ -1361,6 +1361,42 @@ describe("LcmContextEngine session_end lifecycle", () => {
     expect(archived?.archivedAt).not.toBeNull();
   });
 
+  it("keeps the same logical segment when session_end reports a compaction successor", async () => {
+    const engine = createEngine();
+    (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+    const store = engine.getConversationStore();
+
+    const original = await store.getOrCreateConversation("uuid-1", {
+      sessionKey: "agent:main:main",
+    });
+    await store.createMessage({
+      conversationId: original.conversationId,
+      seq: 1,
+      role: "user",
+      content: "seed",
+      tokenCount: 5,
+    });
+
+    await engine.handleSessionEnd({
+      reason: "compaction",
+      sessionId: "uuid-1",
+      sessionKey: "agent:main:main",
+      nextSessionId: "uuid-2",
+      nextSessionKey: "agent:main:main",
+    });
+
+    const active = await store.getConversationBySessionKey("agent:main:main");
+    const refreshedOriginal = await store.getConversation(original.conversationId);
+
+    expect(active).not.toBeNull();
+    expect(active?.conversationId).toBe(original.conversationId);
+    expect(active?.sessionId).toBe("uuid-2");
+    expect(active?.familyKey).toBe(original.familyKey);
+    expect(active?.segmentKey).toBe(original.segmentKey);
+    expect(refreshedOriginal?.active).toBe(true);
+    expect(refreshedOriginal?.archivedAt).toBeNull();
+  });
+
   it("archives the active conversation without replacement on deleted session_end", async () => {
     const engine = createEngine();
     (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
@@ -2514,6 +2550,147 @@ describe("LcmContextEngine.ingest content extraction", () => {
         reason: "conversation already up to date",
       });
       expect(reconcileSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("maintain() uses canonical SQLite transcript scope for GC without reading a transcript file", async () => {
+    await withTempHome(async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+      tempDirs.push(tempDir);
+      const config = createTestConfig(join(tempDir, "lcm.db"));
+      config.largeFileTokenThreshold = 20;
+      config.transcriptGcEnabled = true;
+      const db = createLcmDatabaseConnection(config.databasePath);
+      const sessionId = "sqlite-gc-maintain";
+      const sessionKey = "agent:main:sqlite-gc-maintain";
+      const toolOutput = `${"tool output line\n".repeat(160)}done`;
+      const events = createSqliteTranscriptMessageEvents({
+        sessionId,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call_sqlite_gc_rewrite",
+                name: "exec",
+                arguments: { cmd: "pwd" },
+              },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_sqlite_gc_rewrite",
+            toolName: "exec",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "call_sqlite_gc_rewrite",
+                name: "exec",
+                content: [{ type: "text", text: toolOutput }],
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "done" }],
+          },
+        ],
+      });
+      const frontier = createSqliteTranscriptFrontier(sessionId, events);
+      const deps = createTestDeps(config) as LcmDependencies & {
+        getSqliteSessionTranscriptFrontier: ReturnType<typeof vi.fn>;
+        loadSqliteSessionTranscriptDelta: ReturnType<typeof vi.fn>;
+      };
+      deps.getSqliteSessionTranscriptFrontier = vi.fn(async () => frontier);
+      deps.loadSqliteSessionTranscriptDelta = vi.fn(
+        async (): Promise<MockSqliteTranscriptDelta> => ({
+          mode: "reset",
+          frontier,
+          events,
+        }),
+      );
+      const engine = new LcmContextEngine(deps, db);
+
+      const bootstrap = await engine.bootstrap({
+        sessionId,
+        sessionKey,
+        sessionFile: "/tmp/sqlite-gc-maintain-missing.jsonl",
+      });
+      expect(bootstrap).toEqual({
+        bootstrapped: true,
+        importedMessages: 3,
+      });
+
+      const conversation = await engine.getConversationStore().getConversationForSession({
+        sessionId,
+        sessionKey,
+      });
+      expect(conversation).not.toBeNull();
+
+      const storedMessages = await engine
+        .getConversationStore()
+        .getMessages(conversation!.conversationId);
+      const toolMessage = storedMessages[1];
+      expect(toolMessage?.content).toContain("[LCM Tool Output: file_");
+
+      const summaryId = `sum_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      await engine.getSummaryStore().insertSummary({
+        summaryId,
+        conversationId: conversation!.conversationId,
+        kind: "leaf",
+        content: "summarized sqlite tool output",
+        tokenCount: 16,
+      });
+      await engine.getSummaryStore().linkSummaryToMessages(summaryId, [toolMessage.messageId]);
+      await engine.getSummaryStore().replaceContextRangeWithSummary({
+        conversationId: conversation!.conversationId,
+        startOrdinal: 1,
+        endOrdinal: 1,
+        summaryId,
+      });
+
+      const rewriteTranscriptEntries = vi.fn(async (request: { replacements: unknown[] }) => ({
+        changed: true,
+        bytesFreed: 321,
+        rewrittenEntries: request.replacements.length,
+      }));
+
+      const result = await engine.maintain({
+        sessionId,
+        sessionKey,
+        sessionFile: "/tmp/sqlite-gc-maintain-missing.jsonl",
+        runtimeContext: {
+          rewriteTranscriptEntries,
+        },
+      });
+
+      expect(result).toEqual({
+        changed: true,
+        bytesFreed: 321,
+        rewrittenEntries: 1,
+      });
+      expect(rewriteTranscriptEntries).toHaveBeenCalledWith({
+        replacements: [
+          {
+            entryId: "msg-2",
+            message: expect.objectContaining({
+              role: "toolResult",
+              toolCallId: "call_sqlite_gc_rewrite",
+              toolName: "exec",
+            }),
+          },
+        ],
+      });
+
+      const bootstrapState = await engine
+        .getSummaryStore()
+        .getConversationBootstrapState(conversation!.conversationId);
+      expect(bootstrapState?.transcriptSourceKind).toBe("sqlite");
+      expect(bootstrapState?.transcriptSourceIdentity).toBe("main:sqlite-gc-maintain");
+      expect(bootstrapState?.transcriptEventCount).toBe(frontier.eventCount);
+      expect(bootstrapState?.transcriptLastSeq).toBe(frontier.lastSeq);
+      expect(bootstrapState?.transcriptBaseCreatedAt).toBe(frontier.baseCreatedAt);
     });
   });
 
